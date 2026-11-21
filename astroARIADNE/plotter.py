@@ -1159,111 +1159,128 @@ class SEDPlotter:
             mist_samp = self.out.get('mist_samples', {})
             # Age hist
             if 'age' in mist_samp:
-                f, ax = plt.subplots(figsize=(12, 4))
                 samp = mist_samp['age']
-                n, bins, patches = ax.hist(
-                    samp, alpha=.3, bins=20, label='MIST', density=True
-                )
-                kde = gaussian_kde(samp)
-                xx = np.linspace(bins[0], bins[-1], 10000)
-                ax.plot(xx, kde(xx), color='k', lw=2, alpha=.7)
-                ax.set_ylabel('PDF',
-                              fontsize=self.fontsize,
-                              fontname=self.fontname)
-                ax.set_xlabel('Age',
-                              fontsize=self.fontsize,
-                              fontname=self.fontname)
+                samp = samp[np.isfinite(samp)]
+                if len(samp) == 0:
+                    pass
+                else:
+                    f, ax = plt.subplots(figsize=(12, 4))
+                    n, bins, patches = ax.hist(
+                        samp, alpha=.3, bins=20, label='MIST', density=True
+                    )
+                    kde = gaussian_kde(samp)
+                    xx = np.linspace(bins[0], bins[-1], 10000)
+                    ax.plot(xx, kde(xx), color='k', lw=2, alpha=.7)
+                    ax.set_ylabel('PDF',
+                                  fontsize=self.fontsize,
+                                  fontname=self.fontname)
+                    ax.set_xlabel('Age',
+                                  fontsize=self.fontsize,
+                                  fontname=self.fontname)
 
-                for tick in ax.get_yticklabels():
-                    tick.set_fontname(self.fontname)
-                for tick in ax.get_xticklabels():
-                    tick.set_fontname(self.fontname)
+                    for tick in ax.get_yticklabels():
+                        tick.set_fontname(self.fontname)
+                    for tick in ax.get_xticklabels():
+                        tick.set_fontname(self.fontname)
 
-                ax.tick_params(
-                    axis='both', which='major',
-                    labelsize=self.tick_labelsize
-                )
-                plt.legend(loc=0)
-                if self.png:
-                    plt.savefig(self.hist_out + '/age.png',
-                                bbox_inches='tight')
-                if self.pdf:
-                    plt.savefig(self.hist_out + '/age.pdf',
-                                bbox_inches='tight')
-                plt.close(f)
+                    ax.tick_params(
+                        axis='both', which='major',
+                        labelsize=self.tick_labelsize
+                    )
+                    plt.legend(loc=0)
+                    if self.png:
+                        plt.savefig(self.hist_out + '/age.png',
+                                    bbox_inches='tight')
+                    if self.pdf:
+                        plt.savefig(self.hist_out + '/age.pdf',
+                                    bbox_inches='tight')
+                    plt.close(f)
             # Mass hist
             if 'iso_mass' in mist_samp:
-                f, ax = plt.subplots(figsize=(12, 4))
                 samp = mist_samp['iso_mass']
-                n, bins, patches = ax.hist(
-                    samp, alpha=.3, bins=20, label='MIST', density=True
-                )
-                kde = gaussian_kde(samp)
-                xx = np.linspace(bins[0], bins[-1], 10000)
-                ax.plot(xx, kde(xx), color='k', lw=2, alpha=.7)
-                ax.set_ylabel('PDF',
-                              fontsize=self.fontsize,
-                              fontname=self.fontname)
-                ax.set_xlabel('Mass',
-                              fontsize=self.fontsize,
-                              fontname=self.fontname)
+                samp = samp[np.isfinite(samp)]
+                if len(samp) == 0:
+                    pass
+                else:
+                    f, ax = plt.subplots(figsize=(12, 4))
+                    n, bins, patches = ax.hist(
+                        samp, alpha=.3, bins=20, label='MIST', density=True
+                    )
+                    kde = gaussian_kde(samp)
+                    xx = np.linspace(bins[0], bins[-1], 10000)
+                    ax.plot(xx, kde(xx), color='k', lw=2, alpha=.7)
+                    ax.set_ylabel('PDF',
+                                  fontsize=self.fontsize,
+                                  fontname=self.fontname)
+                    ax.set_xlabel('Mass',
+                                  fontsize=self.fontsize,
+                                  fontname=self.fontname)
 
-                for tick in ax.get_yticklabels():
-                    tick.set_fontname(self.fontname)
-                for tick in ax.get_xticklabels():
-                    tick.set_fontname(self.fontname)
+                    for tick in ax.get_yticklabels():
+                        tick.set_fontname(self.fontname)
+                    for tick in ax.get_xticklabels():
+                        tick.set_fontname(self.fontname)
 
-                ax.tick_params(
-                    axis='both', which='major',
-                    labelsize=self.tick_labelsize
-                )
-                plt.legend(loc=0)
-                if self.png:
-                    plt.savefig(self.hist_out + '/iso_mass.png',
-                                bbox_inches='tight')
-                if self.pdf:
-                    plt.savefig(self.hist_out + '/iso_mass.pdf',
-                                bbox_inches='tight')
-                plt.close(f)
+                    ax.tick_params(
+                        axis='both', which='major',
+                        labelsize=self.tick_labelsize
+                    )
+                    plt.legend(loc=0)
+                    if self.png:
+                        plt.savefig(self.hist_out + '/iso_mass.png',
+                                    bbox_inches='tight')
+                    if self.pdf:
+                        plt.savefig(self.hist_out + '/iso_mass.pdf',
+                                    bbox_inches='tight')
+                    plt.close(f)
             # EEP hist
             if 'eep' in mist_samp:
-                f, ax = plt.subplots(figsize=(12, 4))
                 samp = mist_samp['eep']
-                n, bins, patches = ax.hist(
-                    samp, alpha=.3, bins=20, label='MIST', density=True
-                )
-                kde = gaussian_kde(samp)
-                xx = np.linspace(bins[0], bins[-1], 10000)
-                ax.plot(xx, kde(xx), color='k', lw=2, alpha=.7)
-                ax.set_ylabel('PDF',
-                              fontsize=self.fontsize,
-                              fontname=self.fontname)
-                ax.set_xlabel('EEP',
-                              fontsize=self.fontsize,
-                              fontname=self.fontname)
+                samp = samp[np.isfinite(samp)]
+                if len(samp) == 0:
+                    pass
+                else:
+                    f, ax = plt.subplots(figsize=(12, 4))
+                    n, bins, patches = ax.hist(
+                        samp, alpha=.3, bins=20, label='MIST', density=True
+                    )
+                    kde = gaussian_kde(samp)
+                    xx = np.linspace(bins[0], bins[-1], 10000)
+                    ax.plot(xx, kde(xx), color='k', lw=2, alpha=.7)
+                    ax.set_ylabel('PDF',
+                                  fontsize=self.fontsize,
+                                  fontname=self.fontname)
+                    ax.set_xlabel('EEP',
+                                  fontsize=self.fontsize,
+                                  fontname=self.fontname)
 
-                for tick in ax.get_yticklabels():
-                    tick.set_fontname(self.fontname)
-                for tick in ax.get_xticklabels():
-                    tick.set_fontname(self.fontname)
+                    for tick in ax.get_yticklabels():
+                        tick.set_fontname(self.fontname)
+                    for tick in ax.get_xticklabels():
+                        tick.set_fontname(self.fontname)
 
-                ax.tick_params(
-                    axis='both', which='major',
-                    labelsize=self.tick_labelsize
-                )
-                plt.legend(loc=0)
-                if self.png:
-                    plt.savefig(self.hist_out + '/EEP.png',
-                                bbox_inches='tight')
-                if self.pdf:
-                    plt.savefig(self.hist_out + '/EEP.pdf',
-                                bbox_inches='tight')
-                plt.close(f)
+                    ax.tick_params(
+                        axis='both', which='major',
+                        labelsize=self.tick_labelsize
+                    )
+                    plt.legend(loc=0)
+                    if self.png:
+                        plt.savefig(self.hist_out + '/EEP.png',
+                                    bbox_inches='tight')
+                    if self.pdf:
+                        plt.savefig(self.hist_out + '/EEP.pdf',
+                                    bbox_inches='tight')
+                    plt.close(f)
 
     def plot_bma_HR(self, nsamp):
         """Plot HR diagram for the star."""
         bf_key = f'best_fit_{self.method}'
         if 'age' not in self.out.get(bf_key, {}):
+            return
+        age = self.out[bf_key]['age']
+        if not np.isfinite(age):
+            # No MIST age estimate available (e.g. bolometric correction
+            # grids could not be loaded), so the HR diagram cannot be made.
             return
         print('Plotting HR diagram')
         # Get necessary info from the star.

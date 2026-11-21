@@ -34,7 +34,12 @@ filter_names = np.array([
        'PS1_z', 'SDSS_z', 'SkyMapper_z', 'PS1_y', '2MASS_J', '2MASS_H',
        '2MASS_Ks', 'WISE_RSR_W1', 'SPITZER_IRAC_36', 'SPITZER_IRAC_45',
        'WISE_RSR_W2', 'WISE_RSR_W3', 'WISE_RSR_W4', 'HERSCHEL_PACS_BLUE',
-       'HERSCHEL_PACS_GREEN', 'HERSCHEL_PACS_RED'
+       'HERSCHEL_PACS_GREEN', 'HERSCHEL_PACS_RED',
+       # UV filters from SVO (IUE and TD1/WIDE)
+       'IUE_IUE.1250-1300', 'IUE_IUE.1450-1500', 'IUE_IUE.1675-1725',
+       'IUE_IUE.2150-2200', 'IUE_IUE.2395-2445', 'IUE_IUE.2900-2950',
+       'IUE_IUE.2900-3000', 'TD1_WIDE.1565', 'TD1_WIDE.1965',
+       'TD1_WIDE.2365', 'TD1_WIDE.2740'
 ])
 
 # Native wavelength coverage (upper limit, in micron) of model grids whose
@@ -66,7 +71,9 @@ iso_mask = np.array([
     0, 0, 0, 0, 1, 1,
     1, 1, 0, 0,
     1, 0, 0, 0,
-    0, 0
+    0, 0,
+    # UV filters (IUE and TD1/WIDE) - not used for isochrone fitting
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 ])
 
 # Filter bands for isochrones.

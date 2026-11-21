@@ -4,15 +4,70 @@ This module contains useful functions in order to obtain fluxes from different
 broadband filters. It also has functions to convert to different units of flux
 
 It uses the module pyphot to get the fluxes and bandpasses of different
-broadband filters.
+broadband filters. Custom filters not in pyphot's library are loaded from
+ASCII files in Datafiles/filters/.
 """
 
 import astropy.constants as const
 import astropy.units as u
 import pyphot
 import numpy as np
+import os
 
 _PYPHOT_LIB = pyphot.get_library()
+
+# Cache for custom filters loaded from ASCII files
+_CUSTOM_FILTER_CACHE = {}
+
+# Directory containing custom filter ASCII files
+_CUSTOM_FILTER_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    'Datafiles', 'filters'
+)
+
+
+def _get_custom_filter(band):
+    """Load a custom filter from an ASCII file if not in pyphot's library.
+
+    Parameters
+    ----------
+    band : str
+        Filter name.
+
+    Returns
+    -------
+    pyphot.Filter or None
+        Filter object if found, None otherwise.
+    """
+    if band in _CUSTOM_FILTER_CACHE:
+        return _CUSTOM_FILTER_CACHE[band]
+
+    # Check if filter is in pyphot's library
+    try:
+        filt = _PYPHOT_LIB[band]
+        _CUSTOM_FILTER_CACHE[band] = filt
+        return filt
+    except KeyError:
+        pass
+
+    # Try to load from ASCII file
+    filepath = os.path.join(_CUSTOM_FILTER_DIR, f'{band}.dat')
+    if not os.path.exists(filepath):
+        return None
+
+    try:
+        filt = pyphot.Filter.from_ascii(
+            filepath, dtype='csv', unit='Angstrom', name=band
+        )
+        _CUSTOM_FILTER_CACHE[band] = filt
+        return filt
+    except Exception:
+        return None
+
+
+def _get_filter(band):
+    """Get a filter object, trying pyphot's library first, then custom files."""
+    return _get_custom_filter(band)
 
 
 def extract_info(magnitudes, errors, filters):
@@ -101,9 +156,16 @@ def flux_to_mag(flux, flux_err, band):
 
 
 def get_zero_flux(band):
-    """Look for the filter information in the pyphot library of filters."""
-    # Load photometry filter library
-    filt = _PYPHOT_LIB[band]
+    """Look for the filter information in the pyphot library of filters.
+
+    If the filter is not in pyphot's library, it is loaded from a custom
+    ASCII file in Datafiles/filters/.
+    """
+    filt = _get_filter(band)
+    if filt is None:
+        raise KeyError(
+            f"Filter '{band}' not found in pyphot library or custom filter files."
+        )
     # Get Vega zero flux in erg / cm2 / s / um
     f0 = filt.Vega_zero_flux.to('erg/(um * cm ** 2 * s)').value
     return f0
@@ -111,8 +173,11 @@ def get_zero_flux(band):
 
 def get_effective_wavelength(band):
     """Get central wavelength of a specific filter in um."""
-    # Load photometry filter library
-    filt = _PYPHOT_LIB[band]
+    filt = _get_filter(band)
+    if filt is None:
+        raise KeyError(
+            f"Filter '{band}' not found in pyphot library or custom filter files."
+        )
     # Get central wavelength in um
     leff = filt.cl.to('um').value
     return leff
@@ -120,8 +185,11 @@ def get_effective_wavelength(band):
 
 def get_bandpass(band):
     """Get the bandpass of a specific filter in um."""
-    # Load photometry filter library
-    filt = _PYPHOT_LIB[band]
+    filt = _get_filter(band)
+    if filt is None:
+        raise KeyError(
+            f"Filter '{band}' not found in pyphot library or custom filter files."
+        )
     # Get lower and upper bandpass in um
     width = filt.width.to('um').value
     bp = width

@@ -1504,8 +1504,14 @@ class Fitter:
         oglogg = avgd['originals'][max_prob_mod]['logg']
         ogfeh = avgd['originals'][max_prob_mod]['z']
         fluxes = np.zeros((len(oglogg), len(filter_names)))
-        for i, t, g, z in zip(range(len(oglogg)), ogteff, oglogg, ogfeh):
-            fluxes[i, :] = get_interpolated_flux(t, g, z, filter_names, intp)
+        # Only compute synthetic fluxes for filters present in the model grid
+        grid_filts = [f for f in filter_names if f in intp.column_index]
+        grid_idx = [np.where(filter_names == f)[0][0] for f in grid_filts]
+        if grid_filts:
+            for i, (t, g, z) in enumerate(zip(ogteff, oglogg, ogfeh)):
+                fluxes[i, grid_idx] = get_interpolated_flux(
+                    t, g, z, grid_filts, intp
+                )
         synthdat = 'Filter\tFlux\n'
         for i, filt in enumerate(filter_names):
             samp = fluxes[:, i]
@@ -2048,8 +2054,16 @@ def _bma_grid_worker(index):
 
 def dynesty_loglike_bma(cube, interpolator):
     """Dynesty log likelihood wrapper for BMA."""
-    theta = build_params(cube, coordinator, fixed, use_norm)
-    return log_likelihood(theta, star, interpolator, use_norm, av_law)
+    mask = star.filter_mask
+    flux = star.flux[mask]
+    flux_er = star.flux_er[mask]
+    filts = star.filter_names[mask]
+    wave = star.wave[mask]
+    theta = build_params(
+        cube, flux, flux_er, filts, coordinator, fixed, use_norm
+    )
+    return log_likelihood(theta, flux, flux_er, wave,
+                          filts, interpolator, use_norm, av_law)
 
 
 def dynesty_log_like(cube):

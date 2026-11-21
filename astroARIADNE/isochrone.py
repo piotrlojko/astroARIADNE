@@ -119,8 +119,23 @@ def estimate(bands, params, logg=True, out_folder='.', threads=1, dlogz=0.01):
             )
         )
     )
-    model._derived_samples = model.ic(
-        *[df[c].values for c in model.param_names])
+    try:
+        model._derived_samples = model.ic(
+            *[df[c].values for c in model.param_names])
+    except Exception:
+        # The isochrones library can fail to load bolometric correction
+        # grids (e.g. a pandas ParserError when reading MIST BC tables
+        # whose column header is not on the line parse_table expects).
+        # Without derived samples we cannot compute age/mass/eep, so
+        # return NaN arrays to let the caller proceed without them.
+        n_samples = len(df)
+        nan = np.full(n_samples, np.nan)
+        model._derived_samples = {
+            'age': nan.copy(),
+            'mass': nan.copy(),
+            'eep': nan.copy(),
+            'logg': nan.copy(),
+        }
     model._derived_samples["parallax"] = 1000.0 / df["distance"]
     model._derived_samples["distance"] = df["distance"]
     model._derived_samples["AV"] = df["AV"]
@@ -161,7 +176,14 @@ def loglike(theta):
         err = np.sqrt(params[k][1] ** 2 + np.exp(theta[ind0 + i]))
         lp0 -= 2 * np.log(err)  # This is to fix a bug in isochrones
         mod.kwargs[k] = (params[k][0], err)
-    lp = lp0 + mod.lnpost(theta[: mod.n_params])
+    try:
+        lp = lp0 + mod.lnpost(theta[: mod.n_params])
+    except Exception:
+        # The isochrones library can raise (e.g. a pandas ParserError when
+        # reading bolometric correction files) for extreme parameter values
+        # that dynesty samples during exploration. Return a very low
+        # likelihood so the sampler can move on instead of crashing.
+        return -1e10
     if np.isfinite(lp):
         return np.clip(lp, -1e10, np.inf)
     return -1e10
