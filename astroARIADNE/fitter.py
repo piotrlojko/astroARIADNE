@@ -11,7 +11,7 @@ import time
 import warnings
 
 logger = logging.getLogger(__name__)
-from multiprocessing import (Pool, set_start_method)
+import multiprocessing as _mp
 from tqdm import tqdm
 
 import extinction
@@ -49,7 +49,84 @@ except ModuleNotFoundError:
         '(py)MultiNest installation (or libmultinest.dylib) not detected.'
     )
 
-set_start_method('fork', force=True)
+# Every Pool here hands its workers the photometry, priors and interpolator
+# through module globals set just before the Pool is created, so the workers
+# must be forked. Use a fork context rather than the process-wide start method:
+# set_start_method(force=True) at import time can be undone by any later
+# import or by user code, and spawned workers then die with
+# "NameError: name 'flux' is not defined" (issue #58, PR #81). Passing the
+# state through logl_args/ptform_args instead would re-pickle the model grid
+# with every pool batch.
+_MP_CTX = _mp.get_context('fork')
+Pool = _MP_CTX.Pool
+
+
+_BOUND_CHECKED = ('teff', 'logg', 'z', 'dist', 'rad', 'norm', 'Av')
+
+
+def _prior_bound_flags(samples, priors, frac=0.01):
+    """Parameters whose posterior is truncated by a finite prior bound.
+
+    A parameter is flagged when the gap between the upper (lower) prior
+    bound and the 99.85th (0.15th) percentile, the edge of the 3-sigma
+    interval, is less than ``frac`` of that interval's width: the posterior
+    runs into the wall instead of tailing off before it. Posteriors wider
+    than half the prior are prior-dominated and skipped. The prior span is
+    no yardstick, as it is orders of magnitude wider than the posterior for
+    rad or norm. A lower bound at exactly zero is a physical floor (Av,
+    norm, dist), not a truncation, and is not checked. Only frozen scipy
+    priors have a known support; spline priors are skipped.
+    """
+    flags = []
+    for p in _BOUND_CHECKED:
+        prior, s = priors.get(p), samples.get(p)
+        if prior is None or s is None or not hasattr(prior, 'support'):
+            continue
+        s = np.asarray(s, dtype=float).ravel()
+        s = s[np.isfinite(s)]
+        if s.size < 2:
+            continue
+        try:
+            lo, hi = (float(b) for b in prior.support())
+        except Exception:
+            continue
+        q_lo, q_hi = np.percentile(s, [0.15, 99.85])
+        span = q_hi - q_lo
+        # A posterior that fills its prior (an unconstrained logg) is
+        # prior-dominated, not railed.
+        if span <= 0 or span > 0.5 * (hi - lo):
+            continue
+        if np.isfinite(hi) and q_hi >= hi - frac * span:
+            flags.append({'param': p, 'edge': 'upper', 'quantile': q_hi,
+                          'bound': hi})
+        if np.isfinite(lo) and lo != 0 and q_lo <= lo + frac * span:
+            flags.append({'param': p, 'edge': 'lower', 'quantile': q_lo,
+                          'bound': lo})
+    return flags
+
+
+def _prior_flag_message(f):
+    pct = '99.85' if f['edge'] == 'upper' else '0.15'
+    return (f"{f['param']} posterior truncated by the {f['edge']} prior "
+            f"bound ({pct}th percentile {f['quantile']:.4g}, bound "
+            f"{f['bound']:.4g}): the fit and everything derived from it "
+            f"may be biased. Widen the prior via prior_setup.")
+
+
+def _prior_signature(prior):
+    """A comparable description of one prior: frozen scipy distributions by
+    name and parameters, spline priors by their coefficients."""
+    if prior is None:
+        return None
+    if hasattr(prior, 'dist'):
+        return (prior.dist.name,
+                tuple(float(a) for a in getattr(prior, 'args', ())),
+                tuple(sorted((k, float(v)) for k, v in
+                             (getattr(prior, 'kwds', {}) or {}).items())))
+    if hasattr(prior, 'get_coeffs'):
+        return (type(prior).__name__,
+                tuple(np.round(prior.get_coeffs(), 12).tolist()))
+    return repr(prior)
 
 
 class Fitter:
@@ -116,6 +193,16 @@ class Fitter:
         Manual prior specification consumed by ``create_priors_from_setup``.
     experimental : bool
         Enable experimental code paths. Default ``False``.
+    synthetic_filters : list or None
+        Extra filters to predict at the best-fit SED, written to
+        ``synthetic_user_filters.dat`` (and appended to
+        ``synthetic_magnitudes.dat`` / ``synthetic_fluxes.dat`` with
+        ``observed=0``). Entries may be a pyphot library filter name, a
+        ``pyphot.Filter`` or a ``(name, wavelength_um, transmission)`` tuple
+        (photon-counting detector unless a 4th element ``'energy'`` is given).
+        ARIADNE grid bands are read from the band grid; any other filter is
+        synthesized from the spectra cache (``fetch_spectra_cache()``) and is
+        NaN where the cached BT-Settl spectra do not span it. Default ``None``.
 
     """
 
@@ -148,10 +235,15 @@ class Fitter:
         # ``n_grid_jobs`` processes, so choose a value your machine's core
         # count and memory can handle (each grid loads its own model grid).
         self.n_grid_jobs = 1
+        # Re-fit every BMA grid even when a compatible ``<grid>_out.pkl``
+        # already exists in ``out_folder`` (see ``refit``).
+        self._refit = False
         # Evidence tolerance for the MIST isochrone age/mass nested sampling
         # (the dominant cost of a BMA run). Lower is more precise but slower;
         # the isochrone fit itself is parallelised across ``threads``.
         self.isochrone_dlogz = 0.01
+        # Extra filters to predict at the best-fit SED (issue #88).
+        self.synthetic_filters = None
 
     @property
     def star(self):
@@ -289,6 +381,80 @@ class Fitter:
     @models.setter
     def models(self, mods):
         self._bma_models = mods
+
+    @property
+    def refit(self):
+        """Force ``fit_bma`` to re-fit every grid. Default ``False``.
+
+        With ``False``, a grid whose ``<out_folder>/<grid>_out.pkl`` exists and
+        was produced from the same photometry and parameter layout is loaded
+        instead of re-fitted, so the BMA can be recomputed for a new
+        ``models`` list without re-running dynesty.
+        """
+        return self._refit
+
+    @refit.setter
+    def refit(self, refit):
+        self._refit = bool(refit)
+
+    def _fit_signature(self):
+        """Everything besides the photometry that shapes a grid's posterior:
+        priors, sampler setup, extinction law and the pinned parameters.
+        Saved in each ``<grid>_out.pkl`` so ``fit_bma`` only reuses a fit made
+        with the same choices."""
+        return {
+            'priors': {k: _prior_signature(v) for k, v in
+                       sorted((getattr(self, 'priors', None) or {}).items())},
+            'setup': (self._engine, self._nlive, self._dlogz,
+                      getattr(self, '_bound', None),
+                      getattr(self, '_sample', None),
+                      getattr(self, '_dynamic', None)),
+            'av_law': str(getattr(self, '_av_law', None)),
+            'fixed': [float(x) for x in np.ravel(self.fixed)],
+            'coordinator': [int(x) for x in np.ravel(self.coordinator)],
+        }
+
+    def _reuse_problem(self, grid):
+        """Return why ``<grid>_out.pkl`` cannot be reused, or None if it can."""
+        path = f'{self.out_folder}/{grid}_out.pkl'
+        if not os.path.isfile(path):
+            return 'no previous output'
+        try:
+            with open(path, 'rb') as fh:
+                prev = pickle.load(fh)
+            prev_star = prev['star']
+            prev_filts = list(prev_star.filter_names[prev_star.filter_mask])
+            prev_norm = prev['norm']
+            prev['global_lnZ'], prev['posterior_samples']
+        except Exception as e:
+            return f'unreadable previous output ({type(e).__name__})'
+        if prev.get('model_grid', grid) != grid:
+            return f'previous output is for grid {prev["model_grid"]}'
+        cur_filts = list(self.star.filter_names[self.star.filter_mask])
+        if prev_filts != cur_filts:
+            return 'photometry/filters changed since the previous fit'
+        prev_flux = np.asarray(prev_star.flux)[prev_star.filter_mask]
+        cur_flux = np.asarray(self.star.flux)[self.star.filter_mask]
+        if not np.allclose(prev_flux, cur_flux, rtol=1e-10, atol=0,
+                           equal_nan=True):
+            return 'photometry values changed since the previous fit'
+        sig = prev.get('fit_signature')
+        self._reuse_note = ('' if sig is not None else
+                            ' (older output: priors and sampler settings '
+                            'not recorded, so not checked)')
+        if sig is not None:
+            cur = self._fit_signature()
+            for key, what in (('priors', 'priors'),
+                              ('setup', 'sampler settings'),
+                              ('av_law', 'extinction law'),
+                              ('fixed', 'fixed parameters'),
+                              ('coordinator', 'fixed parameters')):
+                if sig.get(key) != cur[key]:
+                    return f'{what} changed since the previous fit'
+        if bool(prev_norm) != bool(self.norm):
+            return ('fit parameters changed (norm vs dist/rad) since the '
+                    'previous fit')
+        return None
 
     @property
     def sequential(self):
@@ -599,10 +765,20 @@ class Fitter:
             self.prior_sources['rad'] = 'uniform_default'
         # Normalization prior setup.
         else:
-            # up = 1 / 1e-30
-            # defaults['norm'] = st.truncnorm(a=0, b=up, loc=1e-20, scale=1e-10)
-            defaults['norm'] = st.uniform(loc=0, scale=1e-20)
-            self.prior_sources['norm'] = 'uniform_default'
+            # norm = (R / D)^2. A fixed 1e-20 ceiling (R/D < 1e-10) rails
+            # every star nearer than ~225 pc * (R / R_sun) against the bound.
+            # With a distance, scale the ceiling to the rad prior's upper
+            # end, 100.05 R_sun, at the nearest plausible distance
+            # (D - 5 sigma, floored at 1 pc). Without one, 1e-16 still covers
+            # a 1 R_sun star out to ~2 pc.
+            if self.star.dist != -1:
+                d_min = max(self.star.dist - 5 * self.star.dist_e, 1.)
+                up = (100.05 * u.solRad.to(u.pc) / d_min) ** 2
+                defaults['norm'] = st.uniform(loc=0, scale=up)
+                self.prior_sources['norm'] = 'uniform_distance'
+            else:
+                defaults['norm'] = st.uniform(loc=0, scale=1e-16)
+                self.prior_sources['norm'] = 'uniform_default'
         # Extinction prior setup.
         if self.star.Av == 0.:
             av_idx = 4 if self._norm else 5
@@ -611,9 +787,20 @@ class Fitter:
             defaults['Av'] = None
             self.prior_sources['Av'] = 'fixed_zero'
         else:
+            # Av passed to Star by the user, or read from a dust map.
+            user = getattr(self.star, 'Av_source', None) == 'user'
             if self.star.Av_e is None:
                 defaults['Av'] = st.uniform(loc=0, scale=self.star.Av)
-                self.prior_sources['Av'] = 'dustmap_uniform'
+                self.prior_sources['Av'] = ('user_uniform' if user
+                                            else 'dustmap_uniform')
+            elif self.star.Av_e == 0:
+                # Known exactly: pin it.
+                av_idx = 4 if self._norm else 5
+                self.coordinator[av_idx] = 1
+                self.fixed[av_idx] = self.star.Av
+                defaults['Av'] = None
+                self.prior_sources['Av'] = ('user_fixed' if user
+                                            else 'dustmap_fixed')
             else:
                 mu = self.star.Av
                 sig = self.star.Av_e
@@ -621,7 +808,8 @@ class Fitter:
                 up = 100
                 b, a = (up - mu) / sig, (low - mu) / sig
                 defaults['Av'] = st.truncnorm(loc=mu, scale=sig, a=a, b=b)
-                self.prior_sources['Av'] = 'dustmap'
+                self.prior_sources['Av'] = ('user_truncnorm' if user
+                                            else 'dustmap')
         # Noise model prior setup.
         mask = self.star.filter_mask
         flxs = self.star.flux[mask]
@@ -814,17 +1002,23 @@ class Fitter:
                 return args[idx]
             return default
 
+        def _num(x, d=2):
+            # Fixed point hides norm-sized values (1e-20 -> "0.00").
+            if x != 0 and (abs(x) < 1e-3 or abs(x) >= 1e6):
+                return f"{x:.{d}e}"
+            return f"{x:.{d}f}"
+
         try:
             if 'norm_gen' in inner_name and 'truncnorm' not in inner_name:
                 mu = _pop('loc', 0)
                 sigma = _pop('scale', 1, 1.0)
-                return f"N({mu:.3f}, {sigma:.3f})"
+                return f"N({_num(mu, 3)}, {_num(sigma, 3)})"
 
             if 'uniform_gen' in inner_name:
                 a = _pop('loc', 0)
                 scale = _pop('scale', 1, 1.0)
                 b = a + scale
-                return f"U({a:.2f}, {b:.2f})"
+                return f"U({_num(a)}, {_num(b)})"
 
             if 'truncnorm_gen' in inner_name:
                 a_std = _pop('a', 0)
@@ -833,9 +1027,9 @@ class Fitter:
                 sigma = _pop('scale', 3, 1.0)
                 a_act = mu + a_std * sigma
                 b_act = mu + b_std * sigma
-                a_str = "-inf" if a_std < -1e10 else f"{a_act:.2f}"
-                b_str = "inf" if b_std > 1e10 else f"{b_act:.2f}"
-                return f"TN({mu:.2f}, {sigma:.2f}, [{a_str}, {b_str}])"
+                a_str = "-inf" if a_std < -1e10 else _num(a_act)
+                b_str = "inf" if b_std > 1e10 else _num(b_act)
+                return f"TN({_num(mu)}, {_num(sigma)}, [{a_str}, {b_str}])"
 
             return inner_name
 
@@ -864,7 +1058,20 @@ class Fitter:
 
         global interpolator, _BMA_FITTER
 
-        n_jobs = min(max(int(self.n_grid_jobs), 1), len(self._grids))
+        # Reuse compatible ``<grid>_out.pkl`` files instead of re-running
+        # dynesty (unless ``refit``); only the grids in ``todo`` are fitted.
+        todo = []
+        for i, gr in enumerate(self._grids):
+            why = None if self.refit else self._reuse_problem(gr)
+            if not self.refit and why is None:
+                print(f'\t\t\tREUSING EXISTING FIT : {gr}'
+                      f'{getattr(self, "_reuse_note", "")}')
+                continue
+            if not self.refit and why != 'no previous output':
+                print(f'\t\t\tREFITTING {gr} : {why}')
+            todo.append(i)
+
+        n_jobs = min(max(int(self.n_grid_jobs), 1), max(len(todo), 1))
         if n_jobs > 1:
             # Across-grid parallelism: the grids are independent fits, so run
             # several at once (one core each). Each worker writes its own
@@ -875,16 +1082,16 @@ class Fitter:
                     'n_grid_jobs=%d exceeds the %d available CPU cores; '
                     'this will oversubscribe the machine.', n_jobs, ncpu)
             _BMA_FITTER = self
-            print(f'\t\t\tFITTING {len(self._grids)} MODELS, '
+            print(f'\t\t\tFITTING {len(todo)} MODELS, '
                   f'{n_jobs} CONCURRENTLY')
             with Pool(n_jobs) as pool:
-                for gr, err in pool.map(_bma_grid_worker,
-                                        range(len(self._grids))):
+                for gr, err in pool.map(_bma_grid_worker, todo):
                     if err is not None:
                         dump_out = self.out_folder + '/' + gr + '_DUMP.pkl'
                         DynestyError(dump_out, gr, err).__raise__()
         else:
-            for intp, gr in zip(self._interpolators, self._grids):
+            for i in todo:
+                intp, gr = self._interpolators[i], self._grids[i]
                 interpolator = intp
                 self.grid = gr
                 out_file = self.out_folder + '/' + gr + '_out.pkl'
@@ -1158,6 +1365,13 @@ class Fitter:
                 theta, flux, flux_er, wave, filts, interpolator, self.norm,
                 av_law)
 
+        # A posterior railed against a prior bound looks like a normal fit;
+        # say so.
+        out['prior_flags'] = _prior_bound_flags(
+            out['posterior_samples'], getattr(self, 'priors', None) or {})
+        for f_ in out['prior_flags']:
+            warnings.warn(_prior_flag_message(f_), stacklevel=2)
+
         # Best fit
         # The logic is as follows:
         # Calculate KDE for each marginalized posterior distributions
@@ -1242,6 +1456,7 @@ class Fitter:
 
         # Utilities for plotting.
 
+        out['fit_signature'] = self._fit_signature()
         out['fixed'] = self.fixed
         out['coordinator'] = self.coordinator
         out['star'] = self.star
@@ -1252,8 +1467,200 @@ class Fitter:
         if not self.bma:
             with open(log_out, 'w') as logfile:
                 logfile.write(logdat)
+            # Predicted observed photometry for the full band set (+ any
+            # Fitter.synthetic_filters); BMA does this in save_bma.
+            self._write_synthetic(out, out['posterior_samples'])
         pickle.dump(out, open(out_file, 'wb'))
         pass
+
+    def _synth_thetas(self, samples, n_draws=3000):
+        """Posterior draws (subsampled to ``n_draws``) packed as the theta
+        rows ``model_grid`` expects: (ndraws, 5|6). Deterministic."""
+        use_norm = self.norm
+
+        def _col(key):
+            return np.atleast_1d(np.asarray(samples[key], dtype=float))
+        cols = ['teff', 'logg', 'z', 'Av'] + (['norm'] if use_norm
+                                              else ['dist', 'rad'])
+        arrs = {k: _col(k) for k in cols}
+        n = max(a.size for a in arrs.values())
+        arrs = {k: np.broadcast_to(a, (n,)) for k, a in arrs.items()}
+        if n > n_draws:
+            sel = np.random.default_rng(0).choice(n, n_draws, replace=False)
+        else:
+            sel = np.arange(n)
+        if use_norm:
+            return np.column_stack([arrs['teff'], arrs['logg'], arrs['z'],
+                                    arrs['norm'], arrs['Av']])[sel]
+        return np.column_stack([arrs['teff'], arrs['logg'], arrs['z'],
+                                arrs['dist'], arrs['rad'], arrs['Av']])[sel]
+
+    def _synthetic_photometry(self, samples, n_draws=3000):
+        """Predicted observed photometry for the FULL filter set at the fitted SED.
+
+        Propagates the posterior (subsampled to ``n_draws``) through the forward
+        model on the BT-Settl grid -- which spans every ARIADNE band -- so every
+        filter gets an observed synthetic flux and magnitude with 1-sigma errors,
+        distance-, radius- and extinction-scaled exactly as the fit models the
+        data. The point: predict a band the star lacks (a missing G, K, W1, ...)
+        from the bands it has. Bands actually used in the fit are flagged
+        ``observed``; the rest are predictions. For white-dwarf / hot-subdwarf
+        fits the BT-Settl photosphere is only a rough proxy (noted in the header).
+
+        Returns ``{filter: (wave_um, flux, flux_err, mag, mag_err, observed)}``
+        in ``erg s-1 cm-2 um-1`` and the band's native (Vega or AB) mag system.
+        """
+        from .sed_library import model_grid
+        from .phot_utils import flux_to_mag, get_effective_wavelength
+        use_norm = self.norm
+        av_law = self._av_law
+        intp = self.load_interpolator('btsettl')
+        names = [str(f) for f in filter_names]
+        wave = np.array([get_effective_wavelength(f) for f in names])
+        thetas = self._synth_thetas(samples, n_draws)
+        fl = np.array([model_grid(th, filter_names, wave, intp, use_norm, av_law)
+                       for th in thetas])                 # (ndraws, nbands)
+        observed = {str(b) for b in
+                    self.star.filter_names[self.star.used_filters == 1]}
+        photom = {}
+        for j, f in enumerate(names):
+            c = fl[:, j]
+            c = c[np.isfinite(c) & (c > 0)]
+            if c.size < 10:
+                continue
+            fmed = float(np.median(c))
+            ferr = float(0.5 * (np.percentile(c, 84) - np.percentile(c, 16)))
+            mag, mag_err = flux_to_mag(fmed, ferr, f)
+            if not (np.isfinite(mag) and np.isfinite(mag_err)):
+                continue
+            photom[f] = (float(wave[j]), fmed, ferr, float(mag), float(mag_err),
+                         f in observed)
+        return photom
+
+    def _synthetic_user_filters(self, samples, grid_photom=None, n_draws=3000):
+        """Predicted photometry in ``self.synthetic_filters`` (issue #88).
+
+        Names that are ARIADNE grid bands are read from the band-grid result
+        (``grid_photom``, source ``grid``); every other filter is synthesized
+        from the spectra cache's BT-Settl spectra (source ``spectra_cache``)
+        and the SAME posterior draws are pushed through the same forward model.
+        Returns ``({name: record}, header_note)``; records are NaN where the
+        filter is not covered by the cached spectra. Never raises for a missing
+        cache: it warns once with the fetch command and skips those filters.
+        """
+        from . import synth_phot as sp
+        from . import config
+        from .sed_library import model_grid
+        specs = getattr(self, 'synthetic_filters', None)
+        if specs is None or (hasattr(specs, '__len__') and len(specs) == 0):
+            return {}, ''
+        filts = sp.resolve_filters(specs)
+        gridnames = {str(f) for f in filter_names}
+        todo = [sf for sf in filts if sf.name not in gridnames]
+        out = {}
+        gp = grid_photom if grid_photom is not None else {}
+        for sf in filts:
+            if sf.name in gridnames:
+                if sf.name in gp:
+                    _, fx, fxe, _, _, _ = gp[sf.name]
+                    out[sf.name] = sp.user_record(sf, fx, fxe, 'grid')
+                else:
+                    out[sf.name] = sp.user_record(sf, np.nan, np.nan, 'grid')
+        note = 'grid bands: BT-Settl band grid'
+        if todo:
+            path = getattr(config, 'spectra_cache', None)
+            if not path or not os.path.isfile(path):
+                logger.warning(
+                    'synthetic_filters: %s are not ARIADNE grid bands and need '
+                    'the spectra cache, which is missing. Fetch it with: %s '
+                    '(or set $ARIADNE_SPECTRA_CACHE). Those filters are '
+                    'skipped.', [s.name for s in todo], sp.FETCH_CMD)
+            else:
+                key = (path, tuple(s.key for s in todo))
+                store = self.__dict__.setdefault('_synth_cube_cache', {})
+                if key not in store:
+                    store[key] = sp.build_cube(path, todo)
+                cube = store[key]
+                names = [s.name for s in todo]
+                wave = np.array([s.wave_um for s in todo])
+                thetas = self._synth_thetas(samples, n_draws)
+                fl = np.array([model_grid(th, names, wave, cube, self.norm,
+                                          self._av_law) for th in thetas])
+                for j, sf in enumerate(todo):
+                    c = fl[:, j]
+                    c = c[np.isfinite(c) & (c > 0)]
+                    if c.size < 10:
+                        out[sf.name] = sp.user_record(sf, np.nan, np.nan,
+                                                      'spectra_cache')
+                        continue
+                    fmed = float(np.median(c))
+                    ferr = float(0.5 * (np.percentile(c, 84)
+                                        - np.percentile(c, 16)))
+                    out[sf.name] = sp.user_record(sf, fmed, ferr,
+                                                  'spectra_cache')
+                note += (f'; other filters: BT-Settl spectra cache '
+                         f'({os.path.basename(path)}, groups '
+                         f'{"+".join(sp.CACHE_GROUPS)})')
+        # keep the user's order
+        order = [s.name for s in filts]
+        return {n: out[n] for n in order if n in out}, note
+
+    def _write_synthetic(self, out, samples):
+        """Compute and write the synthetic photometry files; never raises."""
+        try:
+            synphot = self._synthetic_photometry(samples)
+        except Exception as e:
+            logger.warning('synthetic photometry skipped: %s', e)
+            synphot = {}
+        user, note = {}, ''
+        try:
+            user, note = self._synthetic_user_filters(samples, synphot)
+        except Exception as e:
+            logger.warning('user-filter synthetic photometry skipped: %s', e)
+        extra = {n: r for n, r in user.items()
+                 if r['source'] == 'spectra_cache' and np.isfinite(r['mag_vega'])}
+        photom = dict(synphot)
+        for n, r in extra.items():
+            photom[n] = (r['wavelength_um'], r['flux'], r['flux_err'],
+                         r['mag_vega'], r['mag_vega_err'], False)
+        out['synthetic_photometry'] = photom
+        out['synthetic_user_filters'] = user
+        try:
+            synthdat, magdat = self._synth_phot_tables(photom, user_names=extra)
+            with open(f'{self.out_folder}/synthetic_fluxes.dat', 'w') as fh:
+                fh.write(synthdat)
+            with open(f'{self.out_folder}/synthetic_magnitudes.dat', 'w') as fh:
+                fh.write(magdat)
+            if user:
+                from . import synth_phot as sp
+                with open(f'{self.out_folder}/synthetic_user_filters.dat',
+                          'w') as fh:
+                    fh.write(sp.user_table(user, note))
+        except Exception as e:
+            logger.warning('writing synthetic photometry files failed: %s', e)
+
+    @staticmethod
+    def _synth_phot_tables(photom, user_names=()):
+        """(flux_table, mag_table) strings for the synthetic-photometry files.
+
+        ``user_names``: names of user-specified (spectra-cache) filters in
+        ``photom``; their magnitudes are Vega-system (noted in the header).
+        """
+        flux = 'Filter\tFlux\n'
+        mag = ('# Predicted observed photometry from the best-fit SED (BT-Settl '
+               'grid).\n# observed=1: band used in the fit; observed=0: '
+               'prediction. Mag in the band native (Vega/AB) system.\n')
+        if len(user_names):
+            mag += ('# User-specified filters (Fitter.synthetic_filters) from '
+                    'the spectra cache: Vega mags, see '
+                    'synthetic_user_filters.dat for AB.\n')
+        mag += ('# Filter\twavelength_um\tmag\tmag_err\tflux_erg_cm2_s_um\t'
+                'flux_err\tobserved\n')
+        for f, (w, fx, fxe, mg, mge, ob) in photom.items():
+            flux += f'{f}\t{fx:.6e}\n'
+            mag += (f'{f}\t{w:.4f}\t{mg:.4f}\t{mge:.4f}\t{fx:.6e}\t{fxe:.6e}\t'
+                    f'{int(ob)}\n')
+        return flux, mag
 
     def save_bma(self, avgd):
         """Save BMA output and relevant information.
@@ -1284,7 +1691,6 @@ class Fitter:
         log_out_samples = f'{self.out_folder}/best_fit_sample.dat'
         log_out_average = f'{self.out_folder}/best_fit_average.dat'
         prob_out = f'{self.out_folder}/model_probabilities.dat'
-        synth_out = f'{self.out_folder}/synthetic_fluxes.dat'
 
         # Save global evidence of each model.
         out['lnZ'] = avgd['evidences']
@@ -1497,28 +1903,11 @@ class Fitter:
                 max_prob_mod = k
             probdat += f'{k}_probability\t{avgd["weights"][k]:.4f}\n'
 
-        # Get synthetic mag and fluxes for highest probability model.
-        synth_mod = 'btsettl'
-        intp = self.load_interpolator(synth_mod)
-        ogteff = avgd['originals'][max_prob_mod]['teff']
-        oglogg = avgd['originals'][max_prob_mod]['logg']
-        ogfeh = avgd['originals'][max_prob_mod]['z']
-        fluxes = np.zeros((len(oglogg), len(filter_names)))
-        # Only compute synthetic fluxes for filters present in the model grid
-        grid_filts = [f for f in filter_names if f in intp.column_index]
-        grid_idx = [np.where(filter_names == f)[0][0] for f in grid_filts]
-        if grid_filts:
-            for i, (t, g, z) in enumerate(zip(ogteff, oglogg, ogfeh)):
-                fluxes[i, grid_idx] = get_interpolated_flux(
-                    t, g, z, grid_filts, intp
-                )
-        synthdat = 'Filter\tFlux\n'
-        for i, filt in enumerate(filter_names):
-            samp = fluxes[:, i]
-            # xx, pdf = estimate_pdf(samp)
-            # cdf = estimate_cdf(samp, hdr=True)
-            b, _, _ = credibility_interval(samp, alpha=1)
-            synthdat += f'{filt}\t{b:.6e}\n'
+        # Predicted OBSERVED synthetic photometry (flux + magnitude) for the
+        # full band set at the fitted SED of the max-probability model,
+        # propagated through the forward model (distance/radius/extinction-
+        # scaled). Never breaks the save.
+        self._write_synthetic(out, avgd['originals'][max_prob_mod])
 
         for i, param in enumerate(order):
             if not self.coordinator[i]:
@@ -1559,8 +1948,6 @@ class Fitter:
             logfile.write(logdat_average)
         with open(prob_out, 'w') as logfile:
             logfile.write(probdat)
-        with open(synth_out, 'w') as logfile:
-            logfile.write(synthdat)
         pickle.dump(out, open(out_file, 'wb'))
         self.out = out
         nc_file = f'{self.out_folder}/ariadne_result.nc'

@@ -5,6 +5,125 @@ All notable changes to astroARIADNE will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.6.0] - 2026-11-20
+
+### Added
+- **Predicted photometry for every ARIADNE band.** Single-grid and BMA fits now
+  write `synthetic_magnitudes.dat` and `synthetic_fluxes.dat` with the observed
+  flux and magnitude (1-sigma errors from up to 3000 posterior draws through the
+  forward model, distance/radius/extinction-scaled) of the best-fit SED in all
+  bands, flagging the bands used in the fit, and store them in the pickle as
+  `synthetic_photometry`. `synthetic_fluxes.dat` now holds observed-frame fluxes
+  (previously BMA-only surface fluxes) (#88).
+- **Predict the best-fit SED in any filter.** `Fitter.synthetic_filters`
+  takes pyphot library filter names, `pyphot.Filter` objects or
+  `(name, wavelength_um, transmission[, 'energy'])` tuples. Filters that are
+  not ARIADNE grid bands are convolved once against the BT-Settl spectra of the
+  spectra cache and pushed through the same posterior draws as the grid bands,
+  giving fluxes, Vega and AB magnitudes with 1-sigma errors in the new
+  `synthetic_user_filters.dat` (also appended to `synthetic_magnitudes.dat` /
+  `synthetic_fluxes.dat` with `observed=0`, and stored in the pickle as
+  `synthetic_user_filters`). Without the cache those filters are skipped with
+  one warning naming the fetch command (#88).
+- **`fit_bma` reuses existing per-grid fits.** A `<grid>_out.pkl` already in
+  `out_folder` is loaded instead of re-running dynesty, so the BMA can be
+  recomputed for a new `models` list (e.g. to re-plot without a bad grid)
+  without refitting (#56). A pickle is reused only if the photometry, the
+  norm vs dist/rad layout, the priors, the sampler settings, the extinction
+  law and the fixed parameters all match the current setup; otherwise that
+  grid is refitted with a note saying why. Outputs written before this
+  release don't record priors or settings and are reused with a note saying
+  so. Set `Fitter.refit = True` to refit every grid.
+- **Gaia blend QC: unresolved neighbours no longer pass silently (#55).**
+  Two checks, after Contardo & Hogg 2024 (arXiv:2403.18941, Sec. 2 and 3.1),
+  switched off together with `Star(contamination_qc=False)`:
+  - *Cross-match uniqueness.* The Gaia best-neighbour queries now also read
+    `number_of_mates` and `number_of_neighbours`. A 2MASS or AllWISE
+    counterpart with `number_of_mates > 0` is shared with other Gaia sources
+    (an unresolved blend), and its bands are dropped; `number_of_neighbours
+    > 1` keeps the bands and warns. Results are in `star.xmatch_flags`. When
+    the ESA archive is unreachable the check is skipped with a warning.
+  - *Neighbour flux contamination.* One Gaia DR3 cone (20") gives, per band,
+    the fractional contaminating flux
+    `c = sum 10^(-0.4 (G_nb - G_target)) exp(-sep^2 / 2 sigma^2)`, with sigma
+    from a per-catalogue PSF FWHM table (`PSF_FWHM_ARCSEC` in
+    `librarian/_contamination.py`; Gaia, TESS, Tycho-2 and Stromgren bands
+    are not checked). Bands with `c > 0.01` are flagged and those with
+    `c > 0.05` (about 0.05 mag) are removed from the fit, each with a warning
+    naming the neighbours. The values are in `star.contamination`; thresholds
+    are `Star(contamination_flag=..., contamination_exclude=...)`. Gaia G is
+    the flux proxy, with no colour term.
+- **HST WFC3 and ACS/WFC bands (#78).** 44 bands (WFC3/UVIS and WFC3/IR
+  wide, medium, long-pass and extremely wide filters, plus ACS/WFC) are grid
+  bands now, reconvolved from each grid's raw spectra, so HST photometry can
+  be added with `Star.add_mag` and enters the fit like any other band. The
+  names are the SVO ones (`HST_WFC3_F814W`, `HST_ACS_WFC_F606W`, ...); see
+  `filters.md`.
+- **Per-band magnitude systems.** HST photometry is published in Vega, ST or
+  AB magnitudes, so `Star(..., mag_system={'HST_WFC3_F814W': 'AB'})` and
+  `Star.add_mag(mag, err, band, system='ST')` say which one a magnitude is in.
+  HST bands default to Vega and every other band keeps its usual system
+  (AB for SDSS, PS1, SkyMapper and GALEX, Vega otherwise). The choice is used
+  everywhere magnitudes become fluxes and back: the fit, the outlier clip,
+  the plots and the synthetic magnitudes.
+
+### Fixed
+- **BOSZ and Coelho radii were too large by sqrt(4 pi) and sqrt(pi).** The
+  BOSZ and Coelho grids held fluxes 1/(4 pi) and 1/pi of every other grid's,
+  and nothing corrected for it, so a fit to either inflated the radius
+  (BOSZ by 3.5x, Coelho by 1.8x). Both are on the common flux scale now.
+- **Coelho, BT-Settl, BT-NextGen and BT-Cond nodes hold one spectrum each.**
+  Coelho took the alpha-enhanced spectrum at the 1177 nodes where both
+  variants exist, and the BT grids whichever [alpha/Fe] variant was written
+  last at their 617 multi-variant nodes. Each node now holds the solar-alpha
+  Coelho model and the standard-alpha BT model ([alpha/Fe] = 0 at
+  [Fe/H] >= 0, +0.2 at -0.5, +0.4 below), the same as ARIADNE v2.
+- **BT-NextGen and BT-Cond were copies of BT-Settl.** Both pickles held
+  BT-Settl's fluxes, so a BMA over the three BT grids counted one model
+  three times. They now hold the BT-NextGen and BT-Cond models.
+- **The outlier clip used Vega zero points for SkyMapper.**
+  `Star.clip_outlier_magnitudes` turned SkyMapper (AB) magnitudes into fluxes
+  as if they were Vega, so those bands were judged against a shifted SED. It
+  now uses the same per-band zero points as the fit.
+- **Multi-threaded fits no longer die with `NameError: name 'flux' is not
+  defined`** on machines where the worker processes are spawned (macOS
+  default) (#58). The fitter's and the isochrone's pools now always fork,
+  through their own fork context, instead of relying on a process-wide
+  `set_start_method('fork', force=True)` at import that any later import or
+  user code could undo. Importing astroARIADNE no longer changes the global
+  start method. Diagnosed by @alexishtz and @JenniferBurt (PR #81).
+- **The default `norm` prior no longer excludes nearby stars.** The fixed
+  U(0, 1e-20) ceiling on (R/D)^2 capped R/D at 1e-10, railing any star
+  nearer than ~225 pc x (R / R_sun) against the bound and returning a wrong
+  Teff and radius with no warning (#90). With a distance, the ceiling is
+  now (100.05 R_sun / D_min)^2, D_min = D - 5 sigma floored at 1 pc.
+- **Fits whose posterior is railed against a prior bound now warn.** A
+  parameter is flagged when its 3-sigma interval runs into a finite prior
+  bound (the gap is under 1% of the interval's width); prior-dominated
+  posteriors and zero floors are not flagged. Previously nothing warned.
+- **The default `norm` ceiling without a distance is 1e-16** (was 1e-20),
+  which covers a 1 R_sun star out to ~2 pc.
+- **`show_priors` prints very small or large bounds in scientific
+  notation;** `U(0, 1e-20)` used to print as `U(0.00, 0.00)`.
+- **A user-supplied extinction no longer crashes `initialize()`.**
+  `Star(Av=..., Av_e=...)` dropped `Av_e`, so `_default_priors` raised
+  `AttributeError` for any star beyond the 70 pc Av auto-pin (#89). `Av_e`
+  is now stored, and with it the Av prior is the truncated normal
+  N(Av, Av_e) on [0, 100] instead of U(0, Av).
+  A user-supplied Av is now labelled `user_*` in `prior_sources` instead of
+  `dustmap*`; `Av_e=0` pins Av at the given value, and a negative `Av_e`
+  is rejected.
+
+## [1.5.6] - 2026-11-19
+
+### Fixed
+- **SkyMapper magnitudes are converted as AB.** `mag_to_flux` and
+  `flux_to_mag` sent every SkyMapper band (u, v, g, r, i, z) through the
+  Vega zero point, but SkyMapper DR2 magnitudes are AB. The fluxes came out
+  too faint, worse in the redder bands, and tilted every fit that used them.
+
 ## [1.5.5] - 2026-11-13
 
 ### Fixed
