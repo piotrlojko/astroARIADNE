@@ -90,6 +90,15 @@ class Star:
         those in the filter_names attribute) and with a tuple containing the
         magnitude and error for that filter as the value. Provide in case no
         internet connection is available.
+    flux_dict: dictionary, optional
+        Like ``mag_dict`` but with apparent fluxes: ``{filter_name: (flux,
+        error)}`` with astropy Quantities in any spectral flux density unit
+        (f_lambda, f_nu, lambda f_lambda or photon flux density; see
+        ``add_flux``), or ``(flux, error, unit)`` with plain numbers, e.g.
+        ``{'2MASS_J': (1.21 * u.Jy, 0.03 * u.Jy),
+        'IUE_IUE.1450-1500': (2.1e-13, 1e-14, 'erg / (s cm2 AA)')}``.
+        Can be combined with ``mag_dict`` (each band in only one of them);
+        either one overrides the catalogue photometry lookup.
     mag_system: dictionary, optional
         Magnitude system of bands that are not in their default system, as
         {filter_name: 'Vega' | 'AB' | 'ST'}. By default PanSTARRS, SDSS, GALEX
@@ -156,7 +165,8 @@ class Star:
                  offline=False, mag_dict=None, verbose=True, ignore=None,
                  dustmap='SFD',
                  contamination_qc=True, contamination_flag=None,
-                 contamination_exclude=None, mag_system=None):
+                 contamination_exclude=None, mag_system=None,
+                 flux_dict=None):
         """See class docstring."""
         # MISC
         self.verbose = verbose
@@ -182,13 +192,34 @@ class Star:
                 StarWarning('Luminosity', 0).warn()
             if mag_dict is not None:
                 StarWarning('Magnitudes', 0).warn()
+            if flux_dict is not None:
+                StarWarning('Fluxes', 0).warn()
 
         self.get_plx = True if plx is None else False
         self.get_dist = True if dist is None and plx is None else False
         self.get_rad = True if rad is None else False
         self.get_temp = True if temp is None else False
         self.get_lum = True if lum is None else False
-        self.get_mags = True if mag_dict is None else False
+        self.get_mags = mag_dict is None and flux_dict is None
+        if not self.get_mags:
+            # Fluxes are stored as magnitudes in the band's system; a band
+            # given in both dicts would be ambiguous.
+            mag_dict = dict(mag_dict or {})
+            both = sorted(set(mag_dict) & set(flux_dict or {}))
+            if both:
+                InputError(f'bands given in both mag_dict and flux_dict: '
+                           f'{both}').__raise__()
+            for band, value in (flux_dict or {}).items():
+                try:
+                    flux, err, *unit = value
+                    if len(unit) > 1:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    InputError(f'flux_dict[{band!r}]: expected (flux, error) '
+                               'or (flux, error, unit), got '
+                               f'{value!r}').__raise__()
+                mag_dict[band] = self._flux_to_mag(
+                    flux, err, band, unit[0] if unit else None, 'flux_dict')
         self.get_logg = False  # This is set to True after self.estimate_logg
 
         self.g_id = g_id
@@ -544,6 +575,48 @@ class Star:
             if getattr(self, 'mag_system', None) is None:
                 self.mag_system = {}
             self.mag_system.update(self._check_mag_system({filt: system}))
+        self._set_photometry(mag, err, filt)
+        print(colored(f'\t\t\tAdded {filt} {mag} +/- {err}!!', 'yellow'))
+        pass
+
+    def add_flux(self, flux, err, filt, unit=None):
+        """Add an individual photometry point given as an apparent flux.
+
+        ``flux`` and ``err`` are astropy Quantities in any spectral flux
+        density unit: f_lambda (e.g. ``u.erg / u.s / u.cm**2 / u.AA``), f_nu
+        (e.g. ``u.Jy``, ``u.mJy``), lambda f_lambda = nu f_nu (e.g.
+        ``u.erg / u.s / u.cm**2``) or photon flux density. They need not share
+        a unit. Plain numbers are read in ``unit`` (e.g. ``unit='mJy'``); a
+        plain-number ``err`` with a Quantity ``flux`` takes ``flux``'s unit.
+
+        The flux is taken at the band's effective wavelength and stored as the
+        equivalent magnitude in the band's magnitude system (see
+        ``mag_system``), so it enters the fit, the isochrone estimate and
+        ``mags.dat`` like any other band, and the fitted flux is exactly the
+        given one. Example::
+
+            s.add_flux(12.3 * u.mJy, 0.4 * u.mJy, 'WISE_RSR_W2')
+            s.add_flux(2.1e-13, 1e-14, 'IUE_IUE.1450-1500',
+                       unit='erg / (s cm2 AA)')
+        """
+        mag, mag_err = self._flux_to_mag(flux, err, filt, unit, 'add_flux')
+        self._set_photometry(mag, mag_err, filt)
+        err_unit = unit or getattr(flux, 'unit', '')
+        shown = [str(v) if isinstance(v, u.Quantity) else f'{v} {un}'
+                 for v, un in ((flux, unit), (err, err_unit))]
+        print(colored(f'\t\t\tAdded {filt} {shown[0]} +/- {shown[1]} '
+                      f'({mag:.4f} +/- {mag_err:.4f} mag)!!', 'yellow'))
+
+    def _flux_to_mag(self, flux, err, filt, unit, where):
+        """Flux (density) in ``filt`` -> (mag, err) in the band's system."""
+        system = (getattr(self, 'mag_system', None) or {}).get(filt)
+        try:
+            return flux_density_to_mag(flux, err, filt, system, unit)
+        except ValueError as e:
+            InputError(f'{where}[{filt!r}]: {e}').__raise__()
+
+    def _set_photometry(self, mag, err, filt):
+        """Store a magnitude for ``filt`` and recompute the fluxes."""
         mask = self.filter_names == filt
         self.mags[mask] = mag
         self.mag_errs[mask] = err
@@ -555,8 +628,6 @@ class Star:
         self.irx_filter_mask = np.where(self.irx_used_filters == 1)[0]
 
         self.__reload_fluxes()
-        print(colored(f'\t\t\tAdded {filt} {mag} +/- {err}!!', 'yellow'))
-        pass
 
     def remove_mag(self, filt):
         """Remove an individual photometry point."""

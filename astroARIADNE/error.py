@@ -198,7 +198,7 @@ class StarWarning(Error):
         if type == 1:
             self.message = 'You are running ARIADNE offline but no magnitudes '
             self.message += 'were given. Make sure you are providing a valid '
-            self.message += 'mag_dict.'
+            self.message += 'mag_dict or flux_dict.'
         if type == 2:
             self.message = 'The selected extinction map returned a NaN! '
             self.message += 'Reverting back to the SFD map!'

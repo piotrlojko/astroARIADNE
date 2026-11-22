@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Photometry as apparent fluxes, with `astropy.units`.** `Star.add_flux(flux,
+  err, band, unit=None)` and `Star(..., flux_dict={band: (flux, err)})` take
+  fluxes as astropy Quantities in any spectral flux density unit (f_lambda,
+  f_nu such as Jy, lambda f_lambda = nu f_nu, or photon flux density), or plain
+  numbers with a unit (`(flux, err, unit)` in `flux_dict`). The flux is taken
+  at the band's effective wavelength and stored as the equivalent magnitude in
+  the band's magnitude system, so the fit uses exactly the given flux.
+  `flux_dict` can be combined with `mag_dict`. The conversion is available as
+  `phot_utils.flux_density_to_flux` / `flux_density_to_mag`.
+
+### Fixed
+- `import astroARIADNE` no longer exits when libmultinest (or a library it
+  links against, such as MKL) cannot be loaded; only the deprecated
+  `multinest` engine becomes unavailable.
+- A failing MIST isochrone evaluation now warns instead of silently giving NaN
+  age, mass and EEP.
+- The IUE and TD1 UV filter curves are now part of the repository.
+
 ## [1.6.0] - 2026-11-20
 
 ### Added

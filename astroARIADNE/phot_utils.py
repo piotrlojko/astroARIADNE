@@ -14,6 +14,8 @@ import pyphot
 import numpy as np
 import os
 
+from .config import filter_names as _FILTER_NAMES
+
 _PYPHOT_LIB = pyphot.get_library()
 
 # Cache for custom filters loaded from ASCII files
@@ -174,6 +176,86 @@ def flux_to_mag(flux, flux_err, band, system=None):
     mag = -2.5 * np.log10(flux / zero_flux(band, system))
     mag_err = 2.5 * flux_err / (np.log(10) * flux)
     return mag, mag_err
+
+
+# Unit of the fluxes ARIADNE fits (f_lambda).
+FLUX_UNIT = u.erg / (u.s * u.cm ** 2 * u.um)
+
+
+def _to_quantity(value, unit, name):
+    """``value`` as a scalar Quantity; plain numbers take ``unit``."""
+    if isinstance(value, u.Quantity):
+        q = value
+    else:
+        if unit is None:
+            raise ValueError(
+                f'{name} {value!r} has no unit: pass an astropy Quantity '
+                '(e.g. 1.2 * u.mJy) or give the unit (e.g. unit="mJy")')
+        try:
+            q = u.Quantity(value, u.Unit(unit))
+        except (TypeError, ValueError) as e:
+            raise ValueError(f'{name}: {e}') from None
+    if isinstance(q.unit, u.FunctionUnitBase):
+        raise ValueError(f'{name} {q} is a magnitude, not a flux; add it '
+                         'with add_mag / mag_dict instead')
+    if not q.isscalar:
+        raise ValueError(f'{name} must be a single value, got {q}')
+    return q
+
+
+def flux_density_to_flux(flux, band, unit=None):
+    """Apparent flux density in ``band`` -> f_lambda in erg s-1 cm-2 um-1.
+
+    ``flux`` is an astropy Quantity in any spectral flux density unit that
+    ``astropy.units.spectral_density`` understands: f_lambda (e.g.
+    erg s-1 cm-2 AA-1, W m-2 nm-1), f_nu (e.g. Jy, mJy, erg s-1 cm-2 Hz-1),
+    lambda f_lambda = nu f_nu (e.g. erg s-1 cm-2, W m-2) or a photon flux
+    density (e.g. photon s-1 cm-2 AA-1). A plain number is read in ``unit``.
+    The conversion is made at the band's effective wavelength, the wavelength
+    ARIADNE assigns to the band (and the one the AB zero point uses).
+    """
+    return _flux_value(flux, band, unit, 'flux')
+
+
+def _flux_value(value, band, unit, name):
+    q = _to_quantity(value, unit, name)
+    wave = get_effective_wavelength(band) * u.um
+    try:
+        return q.to_value(FLUX_UNIT, equivalencies=u.spectral_density(wave))
+    except u.UnitsError:
+        raise ValueError(
+            f'{name}: cannot convert {q.unit} to a flux density; use '
+            'f_lambda, f_nu, lambda*f_lambda (= nu*f_nu) or photon flux '
+            'density units, e.g. erg/(s cm2 AA), Jy, erg/(s cm2)') from None
+
+
+def flux_density_to_mag(flux, flux_err, band, system=None, unit=None):
+    """Convert an apparent flux (density) in ``band`` to a magnitude.
+
+    ``flux`` and ``flux_err`` are astropy Quantities in any flux density unit
+    accepted by ``flux_density_to_flux`` (they need not share a unit), or
+    plain numbers in ``unit``. A plain-number ``flux_err`` (e.g. 0) takes the
+    unit of a Quantity ``flux``. ``system`` is the magnitude system of the
+    result as in ``flux_to_mag`` (None: the band's default).
+
+    Returns ``(mag, mag_err)``; ``mag_to_flux(mag, mag_err, band, system)``
+    gives back the input converted to erg s-1 cm-2 um-1. Raises ValueError if
+    the values cannot be used.
+    """
+    if band not in _FILTER_NAMES:
+        raise ValueError(f'unknown filter {band!r}; names must match '
+                         'Star.filter_names')
+    if (not isinstance(flux_err, u.Quantity)
+            and isinstance(flux, u.Quantity) and unit is None):
+        unit = flux.unit
+    f = _flux_value(flux, band, unit, 'flux')
+    f_err = _flux_value(flux_err, band, unit, 'flux error')
+    if not np.isfinite(f) or f <= 0:
+        raise ValueError(f'flux must be positive and finite, got {flux}')
+    if not np.isfinite(f_err) or f_err < 0:
+        raise ValueError(
+            f'flux error must be >= 0 and finite, got {flux_err}')
+    return flux_to_mag(f, f_err, band, system)
 
 
 def get_zero_flux(band):

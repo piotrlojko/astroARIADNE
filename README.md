@@ -343,6 +343,33 @@ you would do:
 s.add_mag(13.751, 0.032, 'PS1_r')
 ```
 
+If the photometry is published as a flux rather than a magnitude, add it with
+`add_flux`, giving the flux and its error as `astropy` quantities in any
+spectral flux density unit: f_lambda (e.g. erg s^-1 cm^-2 A^-1), f_nu (Jy,
+mJy, W m^-2 Hz^-1), lambda f_lambda = nu f_nu (erg s^-1 cm^-2) or a photon flux
+density. The flux and its error need not share a unit, and plain numbers can be
+used together with `unit`:
+
+```python
+import astropy.units as u
+
+s.add_flux(12.3 * u.mJy, 0.4 * u.mJy, 'WISE_RSR_W2')
+s.add_flux(2.1e-13, 1e-14, 'IUE_IUE.1450-1500', unit='erg / (s cm2 AA)')
+```
+
+The flux is taken at the band's effective wavelength and stored as the
+equivalent magnitude in the band's magnitude system (so `print_mags` and
+`mags.dat` list it as a magnitude), and the fit uses exactly the given flux.
+To build a `Star` from fluxes, use `flux_dict` like `mag_dict` (the two can be
+combined, with each band in only one of them):
+
+```python
+s = Star(starname, ra, dec, g_id=gaia_id,
+         mag_dict={'2MASS_J': (9.763, 0.028)},
+         flux_dict={'2MASS_H': (0.51 * u.Jy, 0.013 * u.Jy),
+                    'IUE_IUE.1450-1500': (2.1e-13, 1e-14, 'erg / (s cm2 AA)')})
+```
+
 If for whatever reason **ARIADNE** found a bad photometry point, and you needed
 to remove it, you can invoke the `remove_mag` method. For example, you wanted
 to remove the TESS magnitude due to it being from a blended source, you can just
@@ -902,7 +929,8 @@ available.
 As of version 1.0, **ARIADNE** now allows for Infrared Excess visualization!
 
 To visualize infrared excess you just need to add the relevant photometric
-observations to the `Star` object with the `add_mag()` method. After the fitting
+observations to the `Star` object with the `add_mag()` (or, for fluxes,
+`add_flux()`) method. After the fitting
 is done, you then need to initiate the `Plotter` object with the `ir_excess`
 parameter set to `True`:
 

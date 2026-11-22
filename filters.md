@@ -56,7 +56,7 @@ The allowed filters are (in wavelength order):
 The HST WFC3 (UVIS and IR) and ACS/WFC wide, medium, long-pass and
 extremely-wide filters can be fitted. Narrow-band and quad filters are not
 included. No catalogue query feeds them, so add the photometry yourself through
-`mag_dict` or `Star.add_mag`:
+`mag_dict` or `Star.add_mag` (or, for fluxes, `flux_dict` or `Star.add_flux`):
 
 - WFC3: `HST_WFC3_F098M`, `F105W`, `F110W`, `F125W`, `F127M`, `F139M`,
   `F140W`, `F153M`, `F160W`, `F200LP`, `F218W`, `F225W`, `F275W`, `F300X`,
@@ -84,3 +84,7 @@ s.add_mag(15.10, 0.02, 'HST_WFC3_F336W', system='ST')
 
 The zero points are 3631 Jy for AB, f_lambda = 10^(-0.4 x 21.10)
 erg s^-1 cm^-2 A^-1 for ST, and Vega for Vega.
+
+Photometry given as a flux (`flux_dict`, `Star.add_flux`) does not need a
+system: it is stored as the magnitude in the band's system, which converts back
+to the same flux.
