@@ -110,3 +110,6 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+
+# Spectra cache downloaded from Zenodo (astroARIADNE.fetch.fetch_spectra_cache, ~2.6 GB)
+astroARIADNE/Datafiles/spectra_cache.h5
