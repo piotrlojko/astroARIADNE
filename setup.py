@@ -50,7 +50,7 @@ setup(
         "corner>=2.2.3",
         "h5py>=3.12.0",
         "tabulate>=0.9.0",
-        "isochrones>=2.1",
+        "isochrones @ git+https://github.com/piotrlojko/isochrones.git@master",
         "arviz>=0.23.4",
         "h5netcdf>=1.4.0"
     ],

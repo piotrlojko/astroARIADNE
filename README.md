@@ -56,7 +56,10 @@ All required dependencies are automatically installed via pip. The main packages
 - pyphot (<http://mfouesneau.github.io/docs/pyphot/>)
 - dustmaps (<https://dustmaps.readthedocs.io/en/latest/>) [**NEEDS CONFIGURING AND DOWNLOADING OF DUSTMAPS**]
 - dynesty (<https://dynesty.readthedocs.io/en/latest/>)
-- isochrones (<https://isochrones.readthedocs.io/en/latest/>) [**NEEDS EXTRA SETUP WITH `nosetests isochrones`**]
+- isochrones (<https://isochrones.readthedocs.io/en/latest/>), installed from the
+  [piotrlojko/isochrones](https://github.com/piotrlojko/isochrones) fork:
+  isochrones 2.1 from PyPI does not work with numpy 2, pandas 3 or current
+  Python [**DOWNLOADS THE MIST MODELS ON FIRST USE, SEE BELOW**]
 
 ### Special Installations
 
@@ -78,17 +81,20 @@ See the [dustmaps documentation](https://dustmaps.readthedocs.io/en/latest/) for
 
 #### isochrones Setup
 
-The isochrones package requires additional setup after installation:
+isochrones downloads the MIST isochrone grid and bolometric-correction tables
+(~1.5 GB, into `~/.isochrones`, or `$ISOCHRONES` if set) the first time they
+are used. To do it up front for the bands ARIADNE uses:
 
 ```bash
-# This downloads required stellar evolution models
-python -c "from isochrones import get_bc_grid; get_bc_grid('mist')"
+python -c "from isochrones import get_ichrone; ic = get_ichrone('mist', bands=['U', 'B', 'BP', 'V', 'G', 'RP', 'TESS', 'J', 'H', 'K', 'W1', 'W2']); ic.model_grid.interp; ic.bc_grid.interp"
 ```
 
-Or run the test suite which handles setup automatically:
-```bash
-nosetests isochrones
-```
+The dependency is a direct reference to the fork
+(`isochrones @ git+https://github.com/piotrlojko/isochrones.git@master`), so
+pip installs isochrones from it automatically. If you also work on isochrones
+from a local editable clone, reinstall ARIADNE with `pip install -e . --no-deps`:
+without `--no-deps` pip replaces the editable isochrones with a checkout of the
+fork.
 
 ## Platform Support
 

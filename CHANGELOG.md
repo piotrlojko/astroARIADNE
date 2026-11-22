@@ -18,7 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `flux_dict` can be combined with `mag_dict`. The conversion is available as
   `phot_utils.flux_density_to_flux` / `flux_density_to_mag`.
 
+### Changed
+- **isochrones comes from the piotrlojko/isochrones fork.** The dependency is
+  now `isochrones @ git+https://github.com/piotrlojko/isochrones.git@master`
+  (isochrones 2.2.0, which runs on numpy 2, pandas 3 and Python 3.14 and falls
+  back to mirrors when the CDS and MIST servers are down) instead of
+  `isochrones>=2.1` from PyPI. Reinstall ARIADNE with `--no-deps` to keep a
+  local editable isochrones.
+
 ### Fixed
+- The README's isochrones setup command (`get_bc_grid` does not exist, and
+  `nosetests` is gone) now downloads the MIST grids with `get_ichrone`.
 - `import astroARIADNE` no longer exits when libmultinest (or a library it
   links against, such as MKL) cannot be loaded; only the deprecated
   `multinest` engine becomes unavailable.
