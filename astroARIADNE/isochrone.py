@@ -125,12 +125,17 @@ def estimate(bands, params, logg=True, out_folder='.', threads=1, dlogz=0.01):
     try:
         model._derived_samples = model.ic(
             *[df[c].values for c in model.param_names])
-    except Exception:
+    except Exception as e:
         # The isochrones library can fail to load bolometric correction
         # grids (e.g. a pandas ParserError when reading MIST BC tables
         # whose column header is not on the line parse_table expects).
         # Without derived samples we cannot compute age/mass/eep, so
-        # return NaN arrays to let the caller proceed without them.
+        # return NaN arrays to let the caller proceed without them, but say
+        # why: a silent NaN hides a broken isochrones installation/cache.
+        warnings.warn(
+            'MIST isochrone evaluation failed '
+            f'({type(e).__name__}: {e}); age, mass, EEP and logg from the '
+            'isochrone fit are set to NaN.', RuntimeWarning)
         n_samples = len(df)
         nan = np.full(n_samples, np.nan)
         model._derived_samples = {

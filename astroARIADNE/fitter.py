@@ -43,10 +43,15 @@ except ModuleNotFoundError:
     warnings.warn(wrn)
     bma_flag = False
 try:
+    # pymultinest calls sys.exit() (SystemExit) when libmultinest, or a
+    # library it links against (e.g. MKL), cannot be loaded; that must not
+    # take the whole package down, since dynesty does not need it.
     import pymultinest
-except ModuleNotFoundError:
+except (ImportError, OSError, SystemExit):
+    pymultinest = None
     warnings.warn(
-        '(py)MultiNest installation (or libmultinest.dylib) not detected.'
+        '(py)MultiNest installation (or libmultinest.so/.dylib) not '
+        'detected; the multinest engine is unavailable.'
     )
 
 # Every Pool here hands its workers the photometry, priors and interpolator
@@ -1187,6 +1192,12 @@ class Fitter:
         flux_er = star.flux_er[mask]
         filts = star.filter_names[mask]
         wave = star.wave[mask]
+        if pymultinest is None:
+            raise ImportError(
+                'pymultinest/libmultinest could not be loaded: build MultiNest '
+                'and add its lib/ directory (and that of any library it links '
+                'against, e.g. MKL) to LD_LIBRARY_PATH, or use the dynesty '
+                'engine.')
         path = self.out_folder + '/mnest/'
         create_dir(path)  # Create multinest path.
         pymultinest.run(
