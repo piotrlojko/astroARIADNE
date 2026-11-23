@@ -3,15 +3,18 @@
 
 ### GENERAL
 figsize 12,8
-fontsize 26
-fontname serif
-tick_labelsize 22
+fontsize 24
+fontname STIXGeneral
+mathtext_fontset stix
+tick_labelsize 20
+legend_fontsize 16
 
 ### SED
 scatter_size 60
 marker o
 marker_model D
 marker_colors aqua
+filter_cmap turbo
 marker_colors_irx lightcoral
 marker_colors_model mediumslateblue
 marker_colors_model_irx orangered
@@ -29,6 +32,7 @@ corner_med_style --
 corner_v_c lightcoral
 corner_v_style -.
 corner_fontsize 20
+corner_title_fontsize 18
 corner_tick_fontsize 15
 corner_labelpad 15
 corner_marker sr

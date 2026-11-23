@@ -2,6 +2,7 @@
 
 __all__ = ['SEDPlotter']
 
+import functools
 import glob
 import logging
 import pickle
@@ -11,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+from matplotlib.lines import Line2D
 import pandas as pd
 import numpy as np
 from astropy import units as u
@@ -32,6 +34,35 @@ from .isochrone import get_isochrone
 from .phot_utils import *
 from .sed_library import *
 from .utils import *
+
+
+# Model grid names as shown in plot legends.
+_GRID_LABELS = {
+    'phoenix': 'PHOENIX', 'btsettl': 'BT-Settl', 'btnextgen': 'BT-NextGen',
+    'btcond': 'BT-Cond', 'ck04': 'Castelli & Kurucz', 'kurucz': 'Kurucz',
+    'coelho': 'Coelho', 'bosz': 'BOSZ', 'tlusty': 'TLUSTY',
+    'sphinx': 'SPHINX',
+}
+
+
+_FLUX_LABEL = r'$\lambda F_\lambda$ (erg cm$^{-2}$ s$^{-1}$)'
+_WAVE_LABEL = r'$\lambda$ ($\mu$m)'
+
+
+def _grid_label(name):
+    """Legend name of a grid, or of a binary pair ('bosz+tlusty')."""
+    return ' + '.join(_GRID_LABELS.get(g.lower(), g)
+                      for g in str(name).split('+'))
+
+
+def _styled(method):
+    """Run a plotting method under the plotter's font settings (STIX text
+    and mathtext by default) without changing the caller's rcParams."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with plt.rc_context(self._rc_params()):
+            return method(self, *args, **kwargs)
+    return wrapper
 
 
 class SEDPlotter:
@@ -207,6 +238,10 @@ class SEDPlotter:
                 if param != 'inflation':
                     theta_samples[i] = bf_sam[param]
                     theta_average[i] = bf_avg[param]
+            # The reported best-fit values (titles and lines of the corner
+            # plot), before any max-likelihood override below.
+            self.theta_best = (theta_samples if method == 'samples'
+                               else theta_average).copy()
             if self.binary:
                 # The secondary's Teff and radius are strongly correlated
                 # (a hotter, smaller star gives the same UV flux), so the
@@ -371,6 +406,151 @@ class SEDPlotter:
             return 0.125
         return 0.25
 
+    # --- styling helpers ----------------------------------------------------
+
+    def _rc_params(self):
+        """rcParams every plot is drawn under (see ``plot_settings.dat``)."""
+        return {
+            'font.family': self.fontname,
+            'mathtext.fontset': self.mathtext_fontset,
+            'legend.fontsize': self.legend_fontsize,
+            'legend.title_fontsize': self.legend_fontsize,
+            'axes.labelsize': self.fontsize,
+            'xtick.labelsize': self.tick_labelsize,
+            'ytick.labelsize': self.tick_labelsize,
+        }
+
+    def _filter_colors(self, waves):
+        """One colour per band, in the order given.
+
+        Bands are ranked by wavelength and spread evenly over the
+        ``filter_cmap`` colormap (violet = bluest, red = reddest), so
+        neighbouring bands get distinct colours however close their
+        wavelengths are. Colours too pale to read on white are darkened.
+        """
+        waves = np.asarray(waves, dtype=float)
+        n = waves.size
+        if n == 0:
+            return np.empty((0, 4))
+        rank = np.empty(n, dtype=int)
+        rank[np.argsort(waves, kind='stable')] = np.arange(n)
+        pos = 0.04 + 0.92 * rank / max(n - 1, 1)
+        cols = np.array(plt.get_cmap(self.filter_cmap)(pos))
+        # Relative luminance (WCAG); darken until the contrast on white is
+        # at least 2.2:1, i.e. luminance <= 0.43.
+        for c in cols:
+            for _ in range(30):
+                lin = np.where(c[:3] <= 0.04045, c[:3] / 12.92,
+                               ((c[:3] + 0.055) / 1.055) ** 2.4)
+                if lin @ [0.2126, 0.7152, 0.0722] <= 0.43:
+                    break
+                c[:3] *= 0.95
+        return cols
+
+    def _param_label(self, param, units=True):
+        """Mathtext symbol (``units=False``) or axis label of a parameter.
+
+        In a binary fit the primary's parameters carry the subscript 1.
+        """
+        b = getattr(self, 'binary', False)
+        sym = {
+            'teff': r'T_{\rm eff,1}' if b else r'T_{\rm eff}',
+            'logg': r'\log g_1' if b else r'\log g',
+            'z': r'{\rm [Fe/H]}',
+            'dist': r'd',
+            'rad': r'R_1' if b else r'R',
+            'norm': r'(R/d)^2',
+            'Av': r'A_V',
+            'inflation': r'\sigma',
+            'teff2': r'T_{\rm eff,2}',
+            'logg2': r'\log g_2',
+            'rad2': r'R_2',
+            'mass': r'M_1' if b else r'M',
+        }.get(param)
+        if sym is None:
+            return param
+        unit = {'teff': 'K', 'teff2': 'K', 'dist': 'pc',
+                'rad': r'R$_{\odot}$', 'rad2': r'R$_{\odot}$',
+                'mass': r'M$_{\odot}$', 'Av': 'mag'}.get(param)
+        if not units:
+            return sym
+        return f'${sym}$' + (f' ({unit})' if unit else '')
+
+    def _value_title(self, param, value, upper, lower):
+        """Corner-plot title: value with asymmetric errors, quoted to two
+        significant figures of the smaller error."""
+        sym = self._param_label(param, units=False)
+        ep, em = upper - value, value - lower
+        scale = 0
+        if value != 0 and abs(value) < 1e-3:
+            scale = int(np.floor(np.log10(abs(value))))
+        v, ep, em = (x / 10 ** scale for x in (value, ep, em))
+        err = min(e for e in (ep, em, np.inf) if e > 0)
+        nd = 2 if not np.isfinite(err) else \
+            int(np.clip(1 - np.floor(np.log10(err)), 0, 8))
+        body = f'{v:.{nd}f}^{{+{ep:.{nd}f}}}_{{-{em:.{nd}f}}}'
+        if scale:
+            body = rf'({body})\times10^{{{scale}}}'
+        return f'${sym} = {body}$'
+
+    def _wave_axis(self, ax, xlims, labels=True):
+        """Log wavelength axis with plain-number ticks (0.2, 0.5, 1, 2...)
+        and unlabelled minor ticks."""
+        ax.set_xscale('log', nonpositive='clip')
+        if xlims[1] > 10:
+            cand = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500]
+        else:
+            cand = [0.1, 0.2, 0.3, 0.5, 1, 2, 3, 5]
+        ticks = [t for t in cand if xlims[0] <= t <= xlims[1]]
+        ax.xaxis.set_major_locator(ticker.FixedLocator(ticks))
+        ax.xaxis.set_minor_locator(
+            ticker.LogLocator(base=10, subs=np.arange(2, 10), numticks=50))
+        ax.xaxis.set_minor_formatter(ticker.NullFormatter())
+        if labels:
+            ax.xaxis.set_major_formatter(
+                ticker.FuncFormatter(lambda v, _: f'{v:g}'))
+        else:
+            ax.xaxis.set_major_formatter(ticker.NullFormatter())
+        ax.set_xlim(xlims)
+
+    def _side_legends(self, ax, handles, filters, waves, colors,
+                      bottom=None):
+        """Legends in a column right of ``ax``: ``handles`` (model curves and
+        marker meanings) on top, then the bands, bluest first, each with the
+        colour of its points. The band legend may run down beside
+        ``bottom`` (the residual panel) and gets more columns if it would
+        not fit."""
+        fig = ax.figure
+        x0, gap = 1.015, 0.02
+        top = 1.0
+        if handles:
+            leg = ax.legend(handles=handles, loc='upper left',
+                            bbox_to_anchor=(x0, top), borderaxespad=0.,
+                            frameon=False, handletextpad=0.5,
+                            labelspacing=0.45, handlelength=1.8)
+            ax.add_artist(leg)
+            # add_artist clips to the axes, which would leave this legend
+            # out of the bbox_inches='tight' crop.
+            leg.set_clip_on(False)
+            box = leg.get_window_extent()
+            top = ax.transAxes.inverted().transform((0, box.y0))[1] - gap
+        order = np.argsort(np.asarray(waves, dtype=float), kind='stable')
+        ms = np.sqrt(self.scatter_size)
+        fhandles = [Line2D([], [], ls='', marker=self.marker, ms=ms,
+                           mfc=colors[i], mec='black', mew=0.6,
+                           label=str(filters[i]))
+                    for i in order]
+        # Rows that fit between ``top`` and the bottom of the lowest panel.
+        low = (bottom or ax).get_position().y0 * fig.bbox.height
+        avail = ax.transAxes.transform((0, top))[1] - low
+        row = self.legend_fontsize * (1 + 0.45) * fig.dpi / 72
+        nrow = max(int(avail // row) - 1, 1)
+        ncol = int(np.ceil(len(fhandles) / nrow))
+        ax.legend(handles=fhandles, loc='upper left',
+                  bbox_to_anchor=(x0, top), borderaxespad=0., ncol=ncol,
+                  title='Filter', frameon=False, handletextpad=0.3,
+                  labelspacing=0.45, columnspacing=1.0, alignment='left')
+
     def _get_raw_spectrum(self, model_key, teff, logg, z):
         """Fetch broadened spectrum for given model and stellar params.
 
@@ -461,8 +641,10 @@ class SEDPlotter:
             wave, flux = sp
             flux = apply(self.av_law(wave * 1e4, Av, Rv), flux.copy())
             comps.append((wave, flux * (r / dist_sr) ** 2))
-        styles = (('--', f'{self.grid}, {teff:.0f} K'),
-                  (':', f'{self.grid2}, {teff2:.0f} K'))
+        styles = (('--', f'Primary: {_grid_label(self.grid)}, '
+                         rf'$T_{{\rm eff}}$ = {teff:.0f} K'),
+                  (':', f'Secondary: {_grid_label(self.grid2)}, '
+                        rf'$T_{{\rm eff}}$ = {teff2:.0f} K'))
         for comp, (ls, lab) in zip(comps, styles):
             if comp is not None:
                 w, f = comp
@@ -472,12 +654,11 @@ class SEDPlotter:
             (w1, f1), (w2, f2) = comps
             ftot = f1 + np.interp(w1, w2, f2, left=np.nan, right=np.nan)
             ax.plot(w1, ftot * w1, lw=1.25, color=self.model_color, zorder=0,
-                    label='sum')
+                    label='Sum')
             if self.save:
                 np.savetxt(f'{self.out_folder}/SED.dat',
                            np.vstack((w1, ftot * w1)).T, fmt='%s',
                            header='wavelength(mu m) wave*flux(erg cm-2 s-2)')
-        ax.legend(loc='upper right', fontsize=self.tick_labelsize * 0.8)
 
     def _grid_axes(self, grid):
         """Unique Teff, log g and [Fe/H] node values of ``grid``."""
@@ -582,6 +763,7 @@ class SEDPlotter:
             ax.plot(w1, ftot * w1, color='gray', alpha=0.15, lw=0.5,
                     zorder=-1)
 
+    @_styled
     def plot_SED_no_model(self, s=None):
         """Plot raw photometry."""
         if self.star is None:
@@ -599,15 +781,9 @@ class SEDPlotter:
         # can be eyeballed against the BB fit drawn below.
         flagged = set(getattr(self.star, '_qc_bb_flagged_bands', None) or [])
 
-        # Colour each point by its effective wavelength so the SED shape reads
-        # directly off the plot: short wavelengths -> violet/blue, long
-        # wavelengths -> orange/red.
-        lam_log = np.log10(self.wave)
-        if lam_log.max() > lam_log.min():
-            cnorm = plt.Normalize(vmin=lam_log.min(), vmax=lam_log.max())
-        else:
-            cnorm = plt.Normalize(vmin=lam_log.min() - 1, vmax=lam_log.max() + 1)
-        point_colors = plt.cm.rainbow(cnorm(lam_log))
+        # One colour per band, violet (bluest) to red (reddest); the filter
+        # legend beside the plot names them.
+        point_colors = self._filter_colors(self.wave)
 
         for c, w, fl, fe, bp, fi in zip(
                 point_colors,
@@ -617,15 +793,16 @@ class SEDPlotter:
                         xerr=bp, yerr=fe * w,
                         fmt='',
                         ecolor=c,
+                        elinewidth=1.5,
                         marker=None)
 
             ax.scatter(w, fl * w,
                        edgecolors='black',
-                       linewidths=0.5,
+                       linewidths=0.6,
                        marker=self.marker,
                        c=[c],
                        s=self.scatter_size,
-                       alpha=self.scatter_alpha, label=fi)
+                       alpha=self.scatter_alpha, zorder=3)
 
             # QC-flagged bands get a hollow red halo drawn on top, which stays
             # visible regardless of the point's wavelength colour (the colormap
@@ -662,36 +839,24 @@ class SEDPlotter:
             F_curve = _planck(lam_curve) * scale
             ax.plot(lam_curve, F_curve * lam_curve,
                     color='0.4', lw=1.0, ls='--', zorder=1,
-                    label=f'BB fit, T={bb_T:.0f} K')
+                    label=rf'Blackbody, $T$ = {bb_T:.0f} K')
 
         ax.set_ylim([ymin * .8, ymax * 1.25])
-        ax.set_xscale('log', nonpositive='clip')
         ax.set_yscale('log', nonpositive='clip')
-        ax.set_ylabel(r'$\lambda$F$_\lambda$ (erg cm$^{-2}$s$^{-1}$)',
-                      fontsize=self.fontsize,
-                      fontname=self.fontname
-                      )
-        ax.legend(loc=0)
+        ax.set_ylabel(_FLUX_LABEL, fontsize=self.fontsize)
+        ax.set_xlabel(_WAVE_LABEL, fontsize=self.fontsize)
+        ax.tick_params(axis='both', which='major',
+                       labelsize=self.tick_labelsize)
+        # Same wavelength axis as the model SED plot.
+        self._wave_axis(ax, [self._sed_xmin(), 6])
 
-        ax.tick_params(
-            axis='both', which='major',
-            labelsize=self.tick_labelsize
-        )
-        ax.tick_params(
-            axis='both', which='minor',
-            labelsize=self.tick_labelsize
-        )
-        # X-axis built like the model SED plot: log scale in micron, integer
-        # ticks, lower bound set by whether GALEX UV bands are present.
-        ax.set_xticks(np.linspace(1, 10, 10))
-        ax.get_xaxis().set_major_formatter(ticker.ScalarFormatter())
-        ax.set_xlim([self._sed_xmin(), 6])
-        ax.set_xlabel(r'$\lambda (\mu m)$',
-                      fontsize=self.fontsize,
-                      fontname=self.fontname)
-
-        for tick in ax.get_yticklabels():
-            tick.set_fontname(self.fontname)
+        handles, _ = ax.get_legend_handles_labels()
+        if flagged & set(used_f):
+            handles.append(Line2D([], [], ls='', marker=self.marker,
+                                  ms=np.sqrt(self.scatter_size * 2.4),
+                                  mfc='none', mec='red', mew=1.8,
+                                  label='Flagged by QC'))
+        self._side_legends(ax, handles, used_f, self.wave, point_colors)
 
         if self.pdf:
             plt.savefig(self.out_folder + '/SED_no_model.pdf',
@@ -701,6 +866,7 @@ class SEDPlotter:
                         bbox_inches='tight')
         pass
 
+    @_styled
     def plot_SED(self):
         """Create the plot of the SED."""
         if self.moddir is None and not spectra_cache:
@@ -742,27 +908,36 @@ class SEDPlotter:
         # Create plot layout
 
         f = plt.figure(figsize=self.figsize)
-        gs = GridSpec(2, 1, height_ratios=[3, 0.75], hspace=0.05)
+        gs = GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
 
         ax = f.add_subplot(gs[0])
         ax_r = f.add_subplot(gs[1])
 
         if self.bma:
             self._plot_bma_gray_spectra(ax)
+        n_lines = len(ax.lines)
         self.SED(ax)
+        if not self.binary:
+            for ln in ax.lines[n_lines:]:
+                ln.set_label(f'{_grid_label(self.grid)}, '
+                             rf'$T_{{\rm eff}}$ = {self.theta[0]:.0f} K')
 
-        # Model plot
-        ax.errorbar(self.wave, self.flux * self.wave,
-                    xerr=self.bandpass, yerr=errors,
-                    fmt=',', ecolor=self.error_color, zorder=0,
-                    marker=None)
+        # Model plot: observed fluxes as circles coloured by band (see the
+        # filter legend), synthetic model fluxes as open diamonds.
+        colors = self._filter_colors(self.wave)
+        for w, fl, bp, er, c in zip(self.wave, self.flux, self.bandpass,
+                                    errors, colors):
+            ax.errorbar(w, fl * w, xerr=bp, yerr=er, fmt='none', ecolor=c,
+                        elinewidth=1.5, zorder=1)
         ax.scatter(self.wave, self.flux * self.wave,
-                   edgecolors='black', marker=self.marker, c=self.marker_colors,
-                   s=self.scatter_size, zorder=1, alpha=self.scatter_alpha)
+                   edgecolors='black', linewidths=0.6, marker=self.marker,
+                   c=colors, s=self.scatter_size, zorder=2,
+                   alpha=self.scatter_alpha)
         ax.scatter(self.wave, self.model * self.wave,
                    marker=self.marker_model,
-                   edgecolors=self.marker_colors_model, s=self.scatter_size,
-                   facecolor='none', zorder=3, lw=3)
+                   edgecolors=self.marker_colors_model,
+                   s=self.scatter_size * 1.6,
+                   facecolor='none', zorder=3, lw=2)
 
         if self.irx:
             ax.errorbar(self.irx_wave, self.irx_flux * self.irx_wave,
@@ -781,12 +956,13 @@ class SEDPlotter:
         # Residual plot
         ax_r.axhline(y=0, lw=2, ls='--', c='k', alpha=.7)
 
-        ax_r.errorbar(self.wave, norm_res, zorder=3,
-                      xerr=self.bandpass, yerr=np.array(self.flux_er) / errors,
-                      fmt=',', ecolor=self.error_color, marker=None)
+        for w, r, bp, re_, c in zip(self.wave, norm_res, self.bandpass,
+                                    np.array(self.flux_er) / errors, colors):
+            ax_r.errorbar(w, r, xerr=bp, yerr=re_, fmt='none', ecolor=c,
+                          elinewidth=1.5, zorder=2)
         ax_r.scatter(self.wave, norm_res, zorder=3,
-                     edgecolors='black', marker=self.marker,
-                     c=self.marker_colors, s=self.scatter_size,
+                     edgecolors='black', linewidths=0.6, marker=self.marker,
+                     c=colors, s=self.scatter_size,
                      alpha=self.scatter_alpha)
         # ax_r.scatter(self.wave, norm_res,
         #              marker=self.marker_model,
@@ -810,63 +986,50 @@ class SEDPlotter:
         # Formatting
         res_std = norm_res.std()
         ax.set_ylim([ymin * 0.6, ymax * 1.5])
-        # ax_r.set_ylim([-5, 5])
-        ax_r.set_ylim([-5 * res_std, 5 * res_std])
-        ax.set_xscale('log', nonpositive='clip')
+        # +-5 standard deviations of the residuals, widened to show them all.
+        res_lim = max(5 * res_std, 1.25 * np.max(np.abs(norm_res)))
+        ax_r.set_ylim([-res_lim, res_lim])
         ax.set_yscale('log', nonpositive='clip')
-        ax_r.set_xscale('log', nonpositive='clip')
-        ax_r.set_xlabel(r'$\lambda (\mu m)$',
-                        fontsize=self.fontsize,
-                        fontname=self.fontname
-                        )
-        ax.set_ylabel(r'$\lambda$F$_\lambda$ (erg cm$^{-2}$s$^{-1}$)',
-                      fontsize=self.fontsize,
-                      fontname=self.fontname
-                      )
-        ax_r.set_ylabel('Residuals\n$(\\sigma)$',
-                        fontsize=self.fontsize,
-                        fontname=self.fontname
-                        )
-
-        ax.tick_params(
-            axis='both', which='major',
-            labelsize=self.tick_labelsize
-        )
-        ax.tick_params(
-            axis='both', which='minor',
-            labelsize=self.tick_labelsize
-        )
-        ax_r.tick_params(
-            axis='both', which='major',
-            labelsize=self.tick_labelsize
-        )
-        xticks = np.linspace(1, 10, 10)
-        if self.irx:
-            xticks = [1, 3, 5, 10, 20, 50, 100, 250]
-        ax_r.set_xticks(xticks)
-        ax_r.get_xaxis().set_major_formatter(ticker.ScalarFormatter())
-        ax.set_xticks(xticks)
-        ax.get_xaxis().set_major_formatter(ticker.NullFormatter())
-        ylocmin = ticker.LinearLocator(numticks=4)
-
-        ax_r.yaxis.set_minor_locator(ylocmin)
-        ax_r.yaxis.set_minor_formatter(ticker.NullFormatter())
+        ax_r.set_xlabel(_WAVE_LABEL, fontsize=self.fontsize)
+        ax.set_ylabel(_FLUX_LABEL, fontsize=self.fontsize)
+        ax_r.set_ylabel('Residuals\n' + r'($\sigma$)',
+                        fontsize=self.tick_labelsize)
+        for a in (ax, ax_r):
+            a.tick_params(axis='both', which='major',
+                          labelsize=self.tick_labelsize)
+        ax_r.yaxis.set_major_locator(ticker.MaxNLocator(nbins=4,
+                                                        symmetric=True))
+        ax_r.yaxis.set_minor_locator(ticker.AutoMinorLocator(2))
 
         xlims = [self._sed_xmin(), 250 if self.irx else 6]
-        ax.set_xlim(xlims)
-        ax_r.set_xlim(xlims)
+        self._wave_axis(ax, xlims, labels=False)
+        self._wave_axis(ax_r, xlims)
 
-        labels = [item.get_text() for item in ax.get_xticklabels()]
-
-        empty_string_labels = [''] * len(labels)
-        ax.set_xticklabels(empty_string_labels)
-
-        for tick in ax.get_yticklabels():
-            tick.set_fontname(self.fontname)
-        for tick in ax_r.get_yticklabels():
-            tick.set_fontname(self.fontname)
-        for tick in ax_r.get_xticklabels():
-            tick.set_fontname(self.fontname)
+        # Legends: model curves and marker meanings in the plot, the bands
+        # beside it.
+        handles, _ = ax.get_legend_handles_labels()
+        if self.bma:
+            handles.append(Line2D([], [], color='gray', alpha=0.5, lw=1,
+                                  label='Posterior draws'))
+        ms = np.sqrt(self.scatter_size)
+        handles += [
+            Line2D([], [], ls='', marker=self.marker, ms=ms, mfc='0.8',
+                   mec='black', mew=0.6, label='Observed'),
+            Line2D([], [], ls='', marker=self.marker_model, ms=ms * 1.1,
+                   mfc='none', mec=self.marker_colors_model, mew=2,
+                   label='Model (synthetic photometry)'),
+        ]
+        if self.irx:
+            handles += [
+                Line2D([], [], ls='', marker=self.marker, ms=ms,
+                       mfc=self.marker_colors_irx, mec='black', mew=0.6,
+                       label='Observed, IR excess'),
+                Line2D([], [], ls='', marker=self.marker_model, ms=ms * 1.1,
+                       mfc='none', mec=self.marker_colors_model_irx, mew=2,
+                       label='Model, IR excess'),
+            ]
+        self._side_legends(ax, handles, filters, self.wave, colors,
+                           bottom=ax_r)
 
         if self.pdf:
             plt.savefig(f'{self.out_folder}/SED.pdf', bbox_inches='tight')
@@ -1079,6 +1242,7 @@ class SEDPlotter:
                        header='wavelength(mu m) wave*flux(erg cm-2 s-2)')
         pass
 
+    @_styled
     def plot_trace(self):
         """Plot SED chains."""
         samples = self.out['posterior_samples']
@@ -1087,7 +1251,7 @@ class SEDPlotter:
                 f, ax = plt.subplots(figsize=(12, 4))
                 ax.step(range(len(samples[param])), samples[param],
                         color='k', alpha=0.8)
-                ax.set_ylabel(param,
+                ax.set_ylabel(self._param_label(param),
                               fontsize=self.fontsize,
                               fontname=self.fontname
                               )
@@ -1107,6 +1271,7 @@ class SEDPlotter:
         plt.close('all')
         pass
 
+    @_styled
     def plot_like(self):
         """Plot Likelihoods."""
         samples = self.out['posterior_samples']
@@ -1121,7 +1286,7 @@ class SEDPlotter:
                               fontsize=self.fontsize,
                               fontname=self.fontname
                               )
-                ax.set_xlabel(param,
+                ax.set_xlabel(self._param_label(param),
                               fontsize=self.fontsize,
                               fontname=self.fontname
                               )
@@ -1141,6 +1306,7 @@ class SEDPlotter:
             plt.savefig(self.like_out + '/dynesty_trace.png')
         pass
 
+    @_styled
     def plot_post(self):
         """Plot posteriors."""
         samples = self.out['posterior_samples']
@@ -1156,7 +1322,7 @@ class SEDPlotter:
                               fontsize=self.fontsize,
                               fontname=self.fontname
                               )
-                ax.set_xlabel(param,
+                ax.set_xlabel(self._param_label(param),
                               fontsize=self.fontsize,
                               fontname=self.fontname
                               )
@@ -1172,6 +1338,7 @@ class SEDPlotter:
     def plot_hist(self):
         pass
 
+    @_styled
     def plot_bma_hist(self):
         """Plot histograms."""
         print('Plotting BMA histograms.')
@@ -1190,7 +1357,8 @@ class SEDPlotter:
                     # Get samples
                     samp = self.out['originals'][m][param]
                     # Plot sample histogram
-                    label = m + ' prob: {:.3f}'.format(self.out['weights'][m])
+                    label = '{}, $P$ = {:.3f}'.format(
+                        _grid_label(m), self.out['weights'][m])
                     # Normal
                     n, bins1, patches = ax1.hist(samp, alpha=.3, bins=20,
                                                  label=label, density=True,
@@ -1237,29 +1405,7 @@ class SEDPlotter:
                 kde = gaussian_kde(self.out['weighted_average'][param])
                 xx = np.linspace(bins[0], bins[-1], 300)
                 ax1.plot(xx, kde(xx), color='tab:pink', lw=2, alpha=1, ls='-.')
-                lab = 'fix this'
-                if param == 'teff':
-                    lab = 'Teff (K)'
-                elif param == 'rad':
-                    lab = r'R$_*$ (R$_\odot$)'
-                elif param == 'dist':
-                    lab = 'D (pc)'
-                elif param == 'logg':
-                    lab = 'Log g'
-                elif param == 'Av':
-                    lab = r'A$_{\rm V}$ (mag)'
-                elif param == 'z':
-                    lab = '[Fe/H]'
-                elif param == 'Age':
-                    lab = 'Age (Gyr)'
-                elif param == 'Mass':
-                    lab = r'Mass (M$_\odot$)'
-                elif param == 'teff2':
-                    lab = r'Teff$_2$ (K)'
-                elif param == 'rad2':
-                    lab = r'R$_2$ (R$_\odot$)'
-                elif param == 'logg2':
-                    lab = r'Log g$_2$'
+                lab = self._param_label(param)
                 # Normal
                 ax1.set_ylabel('PDF',
                                fontsize=self.fontsize,
@@ -1285,7 +1431,7 @@ class SEDPlotter:
                         axis='both', which='major',
                         labelsize=self.tick_labelsize
                     )
-                    ax.legend(loc=0, prop={'size': 16})
+                    ax.legend(loc=0)
 
                 if param == 'z':
                     param = 'Fe_H'
@@ -1321,7 +1467,7 @@ class SEDPlotter:
                     ax.set_ylabel('PDF',
                                   fontsize=self.fontsize,
                                   fontname=self.fontname)
-                    ax.set_xlabel('Age',
+                    ax.set_xlabel('Age (Gyr)',
                                   fontsize=self.fontsize,
                                   fontname=self.fontname)
 
@@ -1359,7 +1505,7 @@ class SEDPlotter:
                     ax.set_ylabel('PDF',
                                   fontsize=self.fontsize,
                                   fontname=self.fontname)
-                    ax.set_xlabel('Mass',
+                    ax.set_xlabel(self._param_label('mass'),
                                   fontsize=self.fontsize,
                                   fontname=self.fontname)
 
@@ -1419,6 +1565,7 @@ class SEDPlotter:
                                     bbox_inches='tight')
                     plt.close(f)
 
+    @_styled
     def plot_bma_HR(self, nsamp):
         """Plot HR diagram for the star."""
         bf_key = f'best_fit_{self.method}'
@@ -1467,11 +1614,10 @@ class SEDPlotter:
         line = ax.add_collection(lc)
         line.zorder = 1000
         cbar = fig.colorbar(line, ax=ax, pad=0.01)
-        cbar.set_label(r'$M_\odot$',
+        cbar.set_label(r'Isochrone mass (M$_{\odot}$)',
                        rotation=270,
                        fontsize=self.fontsize,
-                       fontname=self.fontname,
-                       labelpad=20)
+                       labelpad=28)
 
         for i in range(nsamp):
             a = np.log10(choice(ages)) + 9
@@ -1489,7 +1635,7 @@ class SEDPlotter:
                     zorder=1001)
         ax.scatter(teff, lum, s=350, color=self.hr_color, zorder=1002,
                    edgecolors='k', marker=self.hr_marker,
-                   label='primary' if getattr(self, 'binary', False) else None)
+                   label='Primary' if getattr(self, 'binary', False) else None)
         if getattr(self, 'binary', False):
             # The isochrones are the primary's; the secondary is only placed.
             bf = self.out[f'best_fit_{self.method}']
@@ -1501,26 +1647,19 @@ class SEDPlotter:
                         yerr=[[l2e[0]], [l2e[1]]], color='tab:blue',
                         zorder=1001)
             ax.scatter(t2, l2, s=350, color='tab:blue', zorder=1002,
-                       edgecolors='k', marker='*', label='secondary')
-            ax.legend(loc='best')
+                       edgecolors='k', marker='*', label='Secondary')
+            ax.legend(loc='best', markerscale=0.6)
 
         ax.invert_xaxis()
-        ax.set_xlabel('logTeff',
-                      fontsize=self.fontsize,
-                      fontname=self.fontname)
-        ax.set_ylabel('logL',
-                      fontsize=self.fontsize,
-                      fontname=self.fontname)
+        ax.set_xlabel(r'$\log\,(T_{\rm eff}/{\rm K})$',
+                      fontsize=self.fontsize)
+        ax.set_ylabel(r'$\log\,(L/{\rm L}_{\odot})$',
+                      fontsize=self.fontsize)
         ax.tick_params(
             axis='both', which='major',
             labelsize=self.tick_labelsize
         )
-        for ll in cbar.ax.yaxis.get_ticklabels():
-            ll.set_fontsize(self.tick_labelsize)
-        for tick in ax.get_yticklabels():
-            tick.set_fontname(self.fontname)
-        for tick in ax.get_yticklabels():
-            tick.set_fontname(self.fontname)
+        cbar.ax.tick_params(labelsize=self.tick_labelsize)
 
         if self.png:
             plt.savefig(self.out_folder + '/HR_diagram.png',
@@ -1529,6 +1668,7 @@ class SEDPlotter:
             plt.savefig(self.out_folder + '/HR_diagram.pdf',
                         bbox_inches='tight')
 
+    @_styled
     def plot_corner(self):
         """Make corner plot."""
         print('Plotting corner.')
@@ -1543,7 +1683,8 @@ class SEDPlotter:
             if 'noise' in o:
                 self.coordinator[i] = 1
 
-        theta = self.theta[self.coordinator == 0]
+        theta = getattr(self, 'theta_best', self.theta)
+        theta = theta[self.coordinator == 0]
         used_params = self.order[self.coordinator == 0]
 
         for i, param in enumerate(self.order):
@@ -1557,8 +1698,9 @@ class SEDPlotter:
 
         corner_samp = np.vstack(all_samps)
 
-        titles = self.__create_titles(used_params, theta, theta_up, theta_lo)
-        labels = self.__create_labels(used_params)
+        titles = [self._value_title(p, v, up, lo) for p, v, up, lo
+                  in zip(used_params, theta, theta_up, theta_lo)]
+        labels = [self._param_label(p) for p in used_params]
 
         fig = corner.corner(
             corner_samp.T,
@@ -1568,6 +1710,8 @@ class SEDPlotter:
             no_fill_contours=True,
             max_n_ticks=4
         )
+        # Wider panels than corner's 2 inches, so the titles fit.
+        fig.set_size_inches(fig.get_size_inches() * 1.1)
 
         axes = np.array(fig.axes).reshape((theta.shape[0], theta.shape[0]))
 
@@ -1581,54 +1725,38 @@ class SEDPlotter:
                        linestyle=self.corner_v_style)
             t = titles[i]
 
-            ax.set_title(t, fontsize=self.corner_fontsize,
-                         fontname=self.fontname)
+            ax.set_title(t, fontsize=self.corner_title_fontsize, pad=10)
 
         for yi in range(theta.shape[0]):
             for xi in range(yi):
                 ax = axes[yi, xi]
                 if xi == 0:
-                    for tick in ax.yaxis.get_major_ticks():
-                        tick.label1.set_fontsize(self.corner_tick_fontsize)
-                        tick.label1.set_fontname(self.fontname)
-                        ax.set_ylabel(
-                            labels[yi],
-                            labelpad=self.corner_labelpad,
-                            fontsize=self.corner_fontsize,
-                            fontname=self.fontname
-                        )
+                    ax.tick_params(axis='y',
+                                   labelsize=self.corner_tick_fontsize)
+                    ax.set_ylabel(labels[yi],
+                                  labelpad=self.corner_labelpad,
+                                  fontsize=self.corner_fontsize)
                 if yi == theta.shape[0] - 1:
-                    for tick in ax.xaxis.get_major_ticks():
-                        tick.label1.set_fontsize(self.corner_tick_fontsize)
-                        tick.label1.set_fontname(self.fontname)
-                        ax.set_xlabel(
-                            labels[xi],
-                            labelpad=self.corner_labelpad,
-                            fontsize=self.corner_fontsize,
-                            fontname=self.fontname
-                        )
+                    ax.tick_params(axis='x',
+                                   labelsize=self.corner_tick_fontsize)
+                    ax.set_xlabel(labels[xi],
+                                  labelpad=self.corner_labelpad,
+                                  fontsize=self.corner_fontsize)
                 ax.axvline(theta[xi], color=self.corner_med_c,
                            linestyle=self.corner_med_style)
                 ax.axhline(theta[yi], color=self.corner_med_c,
                            linestyle=self.corner_med_style)
                 ax.plot(theta[xi], theta[yi], self.corner_marker)
-            axes[-1, -1].set_xlabel(
-                labels[-1],
-                labelpad=self.corner_labelpad,
-                fontsize=self.corner_fontsize,
-                fontname=self.fontname
-            )
-            for tick in axes[-1, -1].xaxis.get_major_ticks():
-                tick.label1.set_fontsize(self.corner_tick_fontsize)
-                tick.label1.set_fontname(self.fontname)
+        axes[-1, -1].set_xlabel(labels[-1],
+                                labelpad=self.corner_labelpad,
+                                fontsize=self.corner_fontsize)
+        axes[-1, -1].tick_params(axis='x',
+                                 labelsize=self.corner_tick_fontsize)
 
-            if self.pdf:
-                plt.savefig(f'{self.out_folder}/CORNER.pdf',
-                            bbox_inches='tight')
-            if self.png:
-                plt.savefig(f'{self.out_folder}/CORNER.png',
-                            bbox_inches='tight')
-        pass
+        if self.pdf:
+            plt.savefig(f'{self.out_folder}/CORNER.pdf', bbox_inches='tight')
+        if self.png:
+            plt.savefig(f'{self.out_folder}/CORNER.png', bbox_inches='tight')
 
     def clean(self):
         """Close opened figures."""
@@ -1922,76 +2050,13 @@ class SEDPlotter:
         wave *= u.angstrom.to(u.um)
         return wave, flux
 
-    def __create_titles(self, titles, theta, theta_up, theta_lo):
-        new_titles = np.empty(titles.shape[0], dtype=object)
-        for i, param in enumerate(titles):
-            if param == 'teff':
-                new_titles[i] = r'Teff ='
-            if param == 'logg':
-                new_titles[i] = r'    Log g ='
-            if param == 'z':
-                new_titles[i] = r'        [Fe/H] ='
-            if param == 'dist':
-                new_titles[i] = r'    D ='
-            if param == 'rad':
-                new_titles[i] = r'R ='
-            if param == 'norm':
-                new_titles[i] = r'    (R/D)$^2$ ='
-            if param == 'Av':
-                new_titles[i] = r'Av ='
-            if param == 'inflation':
-                new_titles[i] = r'$\sigma$ ='
-            if param == 'teff2':
-                new_titles[i] = r'Teff$_2$ ='
-            if param == 'logg2':
-                new_titles[i] = r'    Log g$_2$ ='
-            if param == 'rad2':
-                new_titles[i] = r'R$_2$ ='
-            if param in ('rad', 'dist', 'rad2'):
-                new_titles[i] += '{:.3f}'.format(theta[i])
-                new_titles[i] += r'$^{+' + \
-                                 '{:.3f}'.format(theta_up[i] - theta[i])
-                new_titles[i] += r'}_{-' + \
-                                 '{:.3f}'.format(theta[i] - theta_lo[i])
-                new_titles[i] += r'}$'
-            else:
-                new_titles[i] += '{:.2f}'.format(theta[i])
-                new_titles[i] += r'$^{+' + \
-                                 '{:.2f}'.format(theta_up[i] - theta[i])
-                new_titles[i] += r'}_{-' + \
-                                 '{:.2f}'.format(theta[i] - theta_lo[i])
-                new_titles[i] += r'}$'
-        return new_titles
-
-    def __create_labels(self, labels):
-        new_labels = np.empty(labels.shape[0], dtype=object)
-        for i, param in enumerate(labels):
-            if param == 'teff':
-                new_labels[i] = r'Teff (K)'
-            if param == 'logg':
-                new_labels[i] = r'Log g'
-            if param == 'z':
-                new_labels[i] = r'[Fe/H]'
-            if param == 'dist':
-                new_labels[i] = r'D (pc)'
-            if param == 'rad':
-                new_labels[i] = r'R $($R$_\odot)$'
-            if param == 'norm':
-                new_labels[i] = r'(R/D)'
-            if param == 'Av':
-                new_labels[i] = r'Av'
-            if param == 'inflation':
-                new_labels[i] = r'$\sigma$'
-            if param == 'teff2':
-                new_labels[i] = r'Teff$_2$ (K)'
-            if param == 'logg2':
-                new_labels[i] = r'Log g$_2$'
-            if param == 'rad2':
-                new_labels[i] = r'R$_2$ $($R$_\odot)$'
-        return new_labels
-
     def __read_config(self):
         """Read plotter configuration file."""
+        # Defaults for keys that older settings files lack.
+        self.mathtext_fontset = 'stix'
+        self.legend_fontsize = 16
+        self.filter_cmap = 'turbo'
+        self.corner_title_fontsize = 18
         if self.settings_dir is None:
             settings = open(filesdir + '/plot_settings.dat', 'r')
         else:

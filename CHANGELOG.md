@@ -43,6 +43,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   convolved from the same spectra. See `filters.md`.
 
 ### Changed
+- **Plot style.** All plots use STIXGeneral text and STIX mathtext, set by
+  `plot_settings.dat` (new keys `mathtext_fontset`, `legend_fontsize`,
+  `filter_cmap`, `corner_title_fontsize`; older settings files still work) and
+  applied only while SEDPlotter draws. Axis labels and corner titles use proper
+  symbols ($T_{\rm eff}$, $\log g$, $R$ (R$_\odot$), ...), with subscripts 1/2
+  in binary fits; corner titles quote values to two significant figures of
+  their error. In both SED plots each observed point and its error bars are
+  coloured by filter, and a legend beside the plot names the filters from
+  bluest to reddest. In `SED.png` a second legend names the model curves and
+  explains the markers (observed circles, synthetic-photometry diamonds). The
+  wavelength axis is labelled 0.1, 0.2, 0.3, 0.5, 1, 2, ... um.
 - **A BMA fit leaves out grids that lack a fitted band**, with a warning, and
   a standalone fit with such a grid stops with an error naming the grids that
   have the band. Before, fitting a band a grid had no column for (the IUE and
@@ -55,6 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local editable isochrones.
 
 ### Fixed
+- The SED plots printed stray minor tick labels (e.g. 2x10^-1) over the
+  bottom of the model panel and beside the wavelength axis.
+- The corner plot was saved once per parameter instead of once.
 - The README's isochrones setup command (`get_bc_grid` does not exist, and
   `nosetests` is gone) now downloads the MIST grids with `get_ichrone`.
 - `import astroARIADNE` no longer exits when libmultinest (or a library it

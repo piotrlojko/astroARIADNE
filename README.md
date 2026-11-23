@@ -849,13 +849,28 @@ Another important output are the plots. Inside the plots folder you can find
 `CORNER.png/pdf` with the cornerplot (the plot showing the distribution of the
 parameters agains eachother), `HR_diagram.png/pdf` only for the BMA, with the HR
 diagram showing the position of the star, `SED_no_model.png/pdf` with the RAW
-SED showing each photometry point color coded to their respective filter
-(coloured by wavelength, overlaid with the blackbody fit from the photometry
-quality-control step, and any QC-flagged bands circled in red — see below), and
-`SED.png/pdf` with the SED with the catalog photometry plus synthetic
-photometry. If BMA was done, there's also a `histograms` folder inside the plot
-folder with various histograms of the fitted parameters and their distribution
-per model, highlighting the benefits of BMA.
+SED (overlaid with the blackbody fit from the photometry quality-control step,
+and any QC-flagged bands circled in red — see below), and `SED.png/pdf` with
+the SED with the catalog photometry plus synthetic photometry. If BMA was done,
+there's also a `histograms` folder inside the plot folder with various
+histograms of the fitted parameters and their distribution per model,
+highlighting the benefits of BMA.
+
+In both SED plots each observed point (circle) is coloured by its filter, and a
+legend beside the plot names the filters from the bluest to the reddest. The
+colours run from violet to red in wavelength order, spaced evenly by rank so
+that neighbouring bands stay distinguishable. In `SED.png` the open diamonds
+are the model's synthetic photometry; the legend above the filter list
+explains the markers and names the model curves (grid and Teff).
+
+Plots use STIXGeneral text and STIX math (matching LaTeX/Times documents). Fonts,
+sizes and colours come from `Datafiles/plot_settings.dat`; to change them pass
+your own copy with `SEDPlotter(..., settings='my_settings.dat')`. The main keys
+are `fontname`, `mathtext_fontset`, `fontsize` (axis labels), `tick_labelsize`,
+`legend_fontsize`, `filter_cmap` (any matplotlib colormap), and
+`corner_fontsize` / `corner_title_fontsize` / `corner_tick_fontsize`. Settings
+apply only while SEDPlotter draws, so your own matplotlib settings are left
+alone.
 
 Examples of those figures:
 
@@ -906,8 +921,8 @@ numbers in the pickle.
 
 The raw SED plot doubles as a quality-control diagnostic. ARIADNE fits a
 blackbody to the photometry (anchored on the Gaia bands) and overlays it on
-`SED_no_model.png`. Points are coloured by effective wavelength (violet/blue at
-short wavelengths through to orange/red at long ones), and bands that sit more
+`SED_no_model.png`. Points are coloured by filter (violet at short wavelengths
+through to red at long ones, named in the legend), and bands that sit more
 than 5σ off the fit are flagged and **circled in red** so you can eyeball
 whether a catalogue point genuinely belongs to the stellar continuum — useful
 for spotting blends, bad cross-matches or real infrared excesses. By default
