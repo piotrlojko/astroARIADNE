@@ -30,6 +30,7 @@ from .error import *
 from .isochrone import estimate
 from .phot_utils import *
 from .sed_library import *
+from .sed_library import _make_transform
 from .utils import *
 
 try:
@@ -67,6 +68,56 @@ Pool = _MP_CTX.Pool
 
 
 _BOUND_CHECKED = ('teff', 'logg', 'z', 'dist', 'rad', 'norm', 'Av')
+
+
+def _missing_bands(interp, bands):
+    """Bands in ``bands`` that the band-grid interpolator ``interp`` has no
+    model flux for: no column, or a column that is NaN at every node.
+
+    Not every grid carries every ARIADNE band (e.g. only BOSZ and TLUSTY have
+    the IUE and TD-1 ultraviolet bands), and the likelihood looks bands up
+    by name, so a band the grid lacks must be caught before fitting.
+    """
+    cols = interp.column_index
+    out = []
+    for b in bands:
+        j = cols.get(str(b))
+        if j is None or not np.isfinite(interp.grid[..., j]).any():
+            out.append(str(b))
+    return out
+
+
+_ALL_GRIDS = ('phoenix', 'btsettl', 'btnextgen', 'btcond', 'ck04', 'kurucz',
+              'coelho', 'bosz', 'sphinx', 'tlusty')
+
+# Binary-fit state shared with the sampler wrappers (set by
+# Fitter.initialize). The defaults keep single-star fits unchanged.
+binary = False
+contrast = None
+
+
+def _pair_name(grid1, grid2):
+    """BMA/output name of a binary grid pair, e.g. ``'bosz+tlusty'``."""
+    return f'{grid1}+{grid2}'
+
+
+def _grid_teff_range(interp):
+    """(min, max) Teff of a band grid."""
+    t = np.asarray(interp.index_columns[1], dtype=float)
+    return float(t.min()), float(t.max())
+
+
+def _prior_mass_inside(prior, lo, hi, n=4001):
+    """Fraction of a 1-D prior's mass inside [lo, hi] (from its inverse CDF)."""
+    try:
+        q = np.asarray(_make_transform(prior)(np.linspace(0.0005, 0.9995, n)),
+                       dtype=float)
+    except Exception:                                  # noqa: BLE001
+        return 1.0
+    q = q[np.isfinite(q)]
+    if not q.size:
+        return 1.0
+    return float(np.mean((q >= lo) & (q <= hi)))
 
 
 def _prior_bound_flags(samples, priors, frac=0.01):
@@ -170,6 +221,17 @@ class Fitter:
         loads every model interpolator and fits all of them, so it is slower.
     models : list
         The grids to average over when ``bma`` is ``True``.
+    binary : bool
+        Fit the SED as the sum of two stars sharing distance, extinction and
+        [Fe/H] (adds ``teff2``, ``logg2``, ``rad2``). Default ``False``.
+    grid2 : str
+        Secondary's grid for a single-grid binary fit (default: ``grid``).
+    models2 : list or None
+        Secondary grids for a binary BMA: every ``models`` x ``models2`` pair
+        is fitted. ``None`` pairs each grid in ``models`` with itself.
+    contrast : list or None
+        Component contrasts ``(band, m2 - m1, sigma)`` for a binary fit; add
+        them with ``add_contrast``.
     sequential : bool
         If ``True``, fit the BMA grids one after another. See also
         ``n_grid_jobs`` to fit grids concurrently. Default ``True``.
@@ -212,12 +274,25 @@ class Fitter:
     """
 
     colors = colors
+    # Single-star defaults (also for instances built without __init__).
+    _binary = False
+    _grid2 = None
+    _interpolator2 = None
+    _bma_models2 = None
+    contrast = None
 
     def __init__(self):
 
         # Default values for attributes
         self._interpolators = []
         self._grids = []
+        # Binary (two-star) fit: off by default. See ``binary``, ``grid2``,
+        # ``models2`` and ``add_contrast``.
+        self._binary = False
+        self._grid2 = None
+        self._interpolator2 = None
+        self._bma_models2 = None
+        self.contrast = None
         self.out_folder = None
         self.verbose = True
         self.star = None
@@ -334,36 +409,57 @@ class Fitter:
     def grid(self, grid):
         assert type(grid) == str
         self._grid = grid
-        if grid.lower() == 'phoenix':
-            with open(gridsdir + '/Phoenixv2_DF.pkl', 'rb') as intp:
-                self._interpolator = DFInterpolator(pd.read_pickle(intp))
-        if grid.lower() == 'btsettl':
-            with open(gridsdir + '/BTSettl_DF.pkl', 'rb') as intp:
-                self._interpolator = DFInterpolator(pd.read_pickle(intp))
-        if grid.lower() == 'btnextgen':
-            with open(gridsdir + '/BTNextGen_DF.pkl', 'rb') as intp:
-                self._interpolator = DFInterpolator(pd.read_pickle(intp))
-        if grid.lower() == 'btcond':
-            with open(gridsdir + '/BTCond_DF.pkl', 'rb') as intp:
-                self._interpolator = DFInterpolator(pd.read_pickle(intp))
-        if grid.lower() == 'ck04':
-            with open(gridsdir + '/CK04_DF.pkl', 'rb') as intp:
-                self._interpolator = DFInterpolator(pd.read_pickle(intp))
-        if grid.lower() == 'kurucz':
-            with open(gridsdir + '/Kurucz_DF.pkl', 'rb') as intp:
-                self._interpolator = DFInterpolator(pd.read_pickle(intp))
-        if grid.lower() == 'coelho':
-            with open(gridsdir + '/Coelho_DF.pkl', 'rb') as intp:
-                self._interpolator = DFInterpolator(pd.read_pickle(intp))
-        if grid.lower() == 'bosz':
-            with open(gridsdir + '/BOSZ_DF.pkl', 'rb') as intp:
-                self._interpolator = DFInterpolator(pd.read_pickle(intp))
-        if grid.lower() == 'sphinx':
-            with open(gridsdir + '/SPHINX_DF.pkl', 'rb') as intp:
-                self._interpolator = DFInterpolator(pd.read_pickle(intp))
-        if grid.lower() == 'tlusty':
-            with open(gridsdir + '/TLUSTY_DF.pkl', 'rb') as intp:
-                self._interpolator = DFInterpolator(pd.read_pickle(intp))
+        self._interpolator = self.load_interpolator(grid)
+
+    @property
+    def binary(self):
+        """Fit the SED as the sum of two stars (an unresolved binary).
+
+        The components share distance, extinction and [Fe/H]; each has its
+        own ``teff``/``logg``/``rad`` (``teff2``, ``logg2``, ``rad2`` for the
+        secondary, with priors in ``prior_setup`` like any other parameter).
+        Each component can use its own grid: ``grid2`` for a single-grid fit,
+        ``models2`` for BMA (every primary x secondary grid pair is fitted and
+        averaged). Needs ``norm = False``. Optional flux-ratio constraints:
+        ``add_contrast``. Default ``False``.
+        """
+        return self._binary
+
+    @binary.setter
+    def binary(self, binary):
+        self._binary = bool(binary)
+
+    @property
+    def grid2(self):
+        """Grid of the secondary in a single-grid binary fit (default: the
+        primary's ``grid``)."""
+        return self._grid2 if self._grid2 is not None else self._grid
+
+    @grid2.setter
+    def grid2(self, grid):
+        if grid is None:
+            self._grid2, self._interpolator2 = None, None
+            return
+        assert type(grid) == str
+        self._grid2 = grid
+        self._interpolator2 = self.load_interpolator(grid)
+
+    def _secondary_interpolator(self):
+        return (self._interpolator2 if self._grid2 is not None
+                else self._interpolator)
+
+    def add_contrast(self, band, delta_mag, sigma):
+        """Constrain a binary fit with a measured component contrast.
+
+        ``delta_mag`` is ``m2 - m1`` in ARIADNE band ``band`` (positive when
+        the secondary is fainter), e.g. from speckle/AO imaging or a
+        spectroscopic light ratio, with uncertainty ``sigma``. The band need
+        not be one of the fitted photometric bands, but both components'
+        grids must model it. Only used when ``binary`` is True.
+        """
+        if self.contrast is None:
+            self.contrast = []
+        self.contrast.append((str(band), float(delta_mag), float(sigma)))
 
     @property
     def bma(self):
@@ -386,6 +482,18 @@ class Fitter:
     @models.setter
     def models(self, mods):
         self._bma_models = mods
+
+    @property
+    def models2(self):
+        """Secondary grids of a binary BMA fit. ``None`` (default) pairs each
+        grid in ``models`` with itself; a list fits every ``models`` x
+        ``models2`` pair (e.g. ``models = ['bosz']``, ``models2 =
+        ['tlusty']`` for a B star with a hot subdwarf companion)."""
+        return self._bma_models2
+
+    @models2.setter
+    def models2(self, mods):
+        self._bma_models2 = None if mods is None else list(mods)
 
     @property
     def refit(self):
@@ -417,6 +525,9 @@ class Fitter:
             'av_law': str(getattr(self, '_av_law', None)),
             'fixed': [float(x) for x in np.ravel(self.fixed)],
             'coordinator': [int(x) for x in np.ravel(self.coordinator)],
+            'binary': bool(self._binary),
+            'contrast': [list(c) for c in (self.contrast or [])]
+            if self._binary else [],
         }
 
     def _reuse_problem(self, grid):
@@ -456,6 +567,10 @@ class Fitter:
                               ('coordinator', 'fixed parameters')):
                 if sig.get(key) != cur[key]:
                     return f'{what} changed since the previous fit'
+            # Outputs written before binary fits existed are single-star.
+            if (sig.get('binary', False) != cur['binary']
+                    or sig.get('contrast', []) != cur['contrast']):
+                return 'binary setup changed since the previous fit'
         if bool(prev_norm) != bool(self.norm):
             return ('fit parameters changed (norm vs dist/rad) since the '
                     'previous fit')
@@ -545,9 +660,12 @@ class Fitter:
         ``filter_mask`` is substituted, so every downstream consumer
         (dimension count, priors, likelihood, output) sees the reduced set.
         """
-        cov = grid_wave_coverage.get(self._grid.lower())
-        if cov is None:
+        grids = [self._grid] + ([self.grid2] if self._binary else [])
+        covs = [grid_wave_coverage.get(g.lower()) for g in grids]
+        covs = [c for c in covs if c is not None]
+        if not covs:
             return
+        cov = min(covs)
         used = self.star.used_filters == 1
         outside = used & (self.star.wave > cov)
         if not outside.any():
@@ -560,8 +678,47 @@ class Fitter:
         self.star = s
         logger.warning(
             "Grid '%s' only covers <= %.2f um; excluding %d out-of-coverage "
-            "band(s) from the fit: %s", self._grid, cov, len(dropped),
-            ', '.join(dropped))
+            "band(s) from the fit: %s", '+'.join(dict.fromkeys(grids)), cov,
+            len(dropped), ', '.join(dropped))
+
+    def _used_bands(self):
+        return [str(b) for b in self.star.filter_names[self.star.filter_mask]]
+
+    def _check_grid_bands(self):
+        """Standalone fit: stop if a grid (either component's, for a binary)
+        lacks model fluxes for a fitted band, naming the grids that have
+        them."""
+        comps = [(self._grid, self._interpolator)]
+        if self._binary:
+            comps.append((self.grid2, self._secondary_interpolator()))
+        for name, intp in comps:
+            missing = _missing_bands(intp, self._used_bands())
+            if not missing:
+                continue
+            others = [g for g in _ALL_GRIDS if g != name.lower() and
+                      not _missing_bands(self.load_interpolator(g), missing)]
+            err_msg = (f"Grid '{name}' has no model fluxes for the band(s) "
+                       f"{', '.join(missing)}. ")
+            err_msg += (f"Grids that have them: {', '.join(others)}. "
+                        if others else 'No ARIADNE grid has them. ')
+            err_msg += 'Fit with one of those grids or remove the band(s).'
+            InputError(err_msg).__raise__()
+
+    def _prep_contrast(self, interps):
+        """Validate ``contrast`` for the component grids ``interps`` and pack
+        it as ``(bands, dmags, sigmas)`` arrays for the likelihood."""
+        if not self._binary or not self.contrast:
+            return None
+        bands = [str(b) for b, _, _ in self.contrast]
+        for intp in interps:
+            missing = _missing_bands(intp, bands)
+            if missing:
+                return missing
+        sig = np.array([float(x) for _, _, x in self.contrast])
+        if np.any(~np.isfinite(sig)) or np.any(sig <= 0):
+            InputError('add_contrast: sigma must be positive.').__raise__()
+        return (np.array(bands),
+                np.array([float(d) for _, d, _ in self.contrast]), sig)
 
     def initialize(self):
         """Initialize the fitter.
@@ -572,21 +729,40 @@ class Fitter:
         up global variables.
         """
         global prior_dict, coordinator, fixed, order, star, use_norm, av_law
+        global binary, contrast
         self.start = time.time()
         err_msg = 'No star is detected. Please create an instance of Star.'
         if self.star is None:
             er = InputError(err_msg)
             er.log(self.out + '/output.log')
             er.__raise__()
+        binary = self._binary
+        contrast = None
+        if binary:
+            if self.norm:
+                InputError('A binary fit needs the distance/radius '
+                           'parametrisation: set norm = False.').__raise__()
+            if self._engine != 'dynesty':
+                InputError("A binary fit needs the 'dynesty' engine."
+                           ).__raise__()
         # For a standalone fit with a grid of limited wavelength coverage,
         # exclude out-of-coverage bands (e.g. Coelho's extrapolated IR). Not
         # applied in BMA, where every grid must share the same band set.
         if not self._bma:
             self._apply_grid_coverage()
+            self._check_grid_bands()
         star = self.star
         if not self._bma:
             global interpolator
             interpolator = self._interpolator
+            if binary:
+                interpolator = (self._interpolator,
+                                self._secondary_interpolator())
+                contrast = self._prep_contrast(interpolator)
+                if isinstance(contrast, list):
+                    InputError(f"The grids '{self._grid}' / '{self.grid2}' "
+                               f"have no model fluxes for the contrast "
+                               f"band(s) {', '.join(contrast)}.").__raise__()
         use_norm = self.norm
         # Extinction law
         av_law = self._av_law
@@ -601,6 +777,8 @@ class Fitter:
             )
         else:
             order = np.array(['teff', 'logg', 'z', 'norm', 'Av'])
+        if binary:
+            order = np.append(order, BINARY_PARAMS)
 
         # Create output directory
         if self.out_folder is None:
@@ -611,10 +789,10 @@ class Fitter:
 
         # Parameter coordination.
         # Order for the parameters are:
-        # teff, logg, z, dist, rad, Av, noise
+        # teff, logg, z, dist, rad, Av, [teff2, logg2, rad2,] noise
         # or
         # teff, logg, z, norm, Av, noise
-        npars = 6 if not self.norm else 5
+        npars = n_physical(self.norm, binary)
         npars += self.star.used_filters.sum()
         npars = int(npars)
         self.coordinator = np.zeros(npars)  # 1 for fixed params
@@ -650,6 +828,16 @@ class Fitter:
                 off_msg += f'The input temperature is {self.star.temp}'
                 print(colored(off_msg, 'yellow'))
 
+            used = self._used_bands()
+            lacking = []
+            loaded = {}
+
+            def _load(mod):
+                if mod.lower() not in loaded:
+                    loaded[mod.lower()] = self.load_interpolator(mod.lower())
+                return loaded[mod.lower()]
+
+            primaries = []
             for mod in self._bma_models:
                 # We'll assume that if ARIADNE is running in offline mode
                 # Then the star will have > 4000 K
@@ -663,23 +851,103 @@ class Fitter:
                         (mod.lower() == 'sphinx' and self.star.temp > 4000) or \
                         (mod.lower() == 'tlusty' and self.star.temp < 15000):
                     continue
+                primaries.append(mod)
 
-                df = self.load_interpolator(mod.lower())
+            # Single star: one fit per grid. Binary: one fit per
+            # (primary grid, secondary grid) pair; the secondary is not
+            # temperature-gated (star.temp describes the primary), so pick
+            # ``models2`` for the companion you expect.
+            if binary:
+                if self._bma_models2 is None:
+                    members = [(m, m) for m in primaries]
+                else:
+                    members = [(m, m2) for m in primaries
+                               for m2 in self._bma_models2]
+            else:
+                members = [(m, None) for m in primaries]
 
-                self._interpolators.append(df)
-                self._grids.append(mod)
+            for mod, mod2 in members:
+                name = mod if mod2 is None else _pair_name(mod, mod2)
+                # Every BMA member must model every fitted band (the
+                # evidences are compared), so a grid without model fluxes
+                # for one of them (e.g. the IUE / TD-1 bands, which only
+                # BOSZ and TLUSTY carry) is left out.
+                comps = [(mod, _load(mod))]
+                if mod2 is not None:
+                    comps.append((mod2, _load(mod2)))
+                missing = []
+                for g, df in comps:
+                    missing += [b for b in _missing_bands(df, used)
+                                if b not in missing]
+                if missing:
+                    lacking.append((name, missing))
+                    continue
+                if mod2 is None:
+                    self._interpolators.append(comps[0][1])
+                else:
+                    pair = (comps[0][1], comps[1][1])
+                    c = self._prep_contrast(pair)
+                    if isinstance(c, list):
+                        lacking.append((name, c))
+                        continue
+                    self._interpolators.append(pair)
+                self._grids.append(name)
+            for mod, missing in lacking:
+                logger.warning("Grid '%s' has no model fluxes for %s; leaving "
+                               "it out of the BMA.", mod, ', '.join(missing))
+            if not self._interpolators:
+                err_msg = 'No BMA grid can be fitted: '
+                err_msg += ('every grid left after the temperature gating '
+                            'lacks model fluxes for '
+                            f"{', '.join(sorted({b for _, m in lacking for b in m}))}"
+                            if lacking else
+                            f'the temperature gating (star.temp = '
+                            f'{self.star.temp}) excludes all of '
+                            f'{self._bma_models}')
+                err_msg += '.'
+                InputError(err_msg).__raise__()
+            if binary and self.contrast:
+                contrast = self._prep_contrast(self._interpolators[0])
             thr = self._threads if self._sequential else len(
                 self._interpolators)
         else:
             thr = self._threads
         en = 'Bayesian Model Averaging' if self._bma else self._engine
+        if binary:
+            en += ' (binary)'
+            self._warn_secondary_prior_coverage()
         display_routine(en, self._nlive, self._dlogz, self.ndim, self._bound,
                         self._sample, thr, self._dynamic)
         self.show_priors()
 
+    def _warn_secondary_prior_coverage(self):
+        """Warn when much of the teff2 prior lies outside a secondary grid:
+        the model there is NaN (zero likelihood), which truncates the prior
+        and lowers that grid's evidence."""
+        prior = (getattr(self, 'priors', None) or {}).get('teff2')
+        if prior is None:
+            return
+        if self._bma:
+            grids = {}
+            for name, intp in zip(self._grids, self._interpolators):
+                g2 = split_grid_name(name)[1] or name
+                grids[g2] = intp[1] if isinstance(intp, tuple) else intp
+        else:
+            grids = {self.grid2: self._secondary_interpolator()}
+        for g2, intp in grids.items():
+            lo, hi = _grid_teff_range(intp)
+            frac = _prior_mass_inside(prior, lo, hi)
+            if frac < 0.99:
+                logger.warning(
+                    "Only %.0f%% of the teff2 prior lies inside the "
+                    "secondary grid '%s' (%.0f-%.0f K); outside it the model "
+                    "is undefined, which truncates the prior and lowers the "
+                    "evidence. Narrow the teff2 prior or choose another "
+                    "secondary grid.", 100 * frac, g2, lo, hi)
+
     def get_ndim(self):
         """Calculate number of dimensions."""
-        ndim = 6 if not self.norm else 5
+        ndim = n_physical(self.norm, self._binary)
         ndim += self.star.used_filters.sum()
         ndim -= self.coordinator.sum()
         return int(ndim)
@@ -815,6 +1083,22 @@ class Fitter:
                 defaults['Av'] = st.truncnorm(loc=mu, scale=sig, a=a, b=b)
                 self.prior_sources['Av'] = ('user_truncnorm' if user
                                             else 'dustmap')
+        # Secondary star of a binary fit: the primary's Teff and radius priors
+        # (a TLUSTY secondary gets TLUSTY's 15-55 kK range instead), and a
+        # uniform log g. Set teff2 / logg2 / rad2 in prior_setup to override.
+        if self._binary:
+            g2s = ([self.grid2] if not self._bma else
+                   (self._bma_models2 or self._bma_models or []))
+            if g2s and all(str(g).lower() == 'tlusty' for g in g2s):
+                defaults['teff2'] = st.uniform(loc=15000, scale=40000)
+                self.prior_sources['teff2'] = 'tlusty_uniform'
+            else:
+                defaults['teff2'] = defaults['teff']
+                self.prior_sources['teff2'] = self.prior_sources['teff']
+            defaults['logg2'] = st.uniform(loc=3.5, scale=2.5)
+            self.prior_sources['logg2'] = 'uniform_default'
+            defaults['rad2'] = defaults['rad']
+            self.prior_sources['rad2'] = 'uniform_default'
         # Noise model prior setup.
         mask = self.star.filter_mask
         flxs = self.star.flux[mask]
@@ -900,6 +1184,15 @@ class Fitter:
                         self.prior_sources[k] = 'user_uniform'
         for par in noise:
             prior_dict[par] = self.default_priors[par]
+        # A binary's secondary parameters missing from prior_setup take their
+        # defaults (see _default_priors).
+        if self._binary:
+            for par in BINARY_PARAMS:
+                if par not in keys:
+                    prior_dict[par] = self.default_priors[par]
+                    prior_out += par + '\tdefault\n'
+                    logger.info('No prior for %s in prior_setup: using the '
+                                'default', par)
         ff = open(self.out_folder + '/prior.dat', 'w')
         ff.write(prior_out)
         ff.close()
@@ -945,7 +1238,8 @@ class Fitter:
             prior_strs[param_name] = prior_str
 
         # Sort parameters in logical order
-        param_order = ['teff', 'logg', 'z', 'dist', 'rad', 'norm', 'Av']
+        param_order = ['teff', 'logg', 'z', 'dist', 'rad', 'norm', 'Av',
+                       'teff2', 'logg2', 'rad2']
         sorted_params = [p for p in param_order if p in physical_params]
         sorted_params.extend([p for p in physical_params if p not in param_order])
 
@@ -1049,7 +1343,8 @@ class Fitter:
             self.fit_dynesty()
         elapsed_time = execution_time(self.start)
         end(self.coordinator, elapsed_time,
-            self.out_folder, self._engine, self.norm, )
+            self.out_folder, self._engine, self.norm,
+            out_file=getattr(self, '_last_out_file', None))
         pass
 
     def fit_bma(self):
@@ -1098,7 +1393,9 @@ class Fitter:
             for i in todo:
                 intp, gr = self._interpolators[i], self._grids[i]
                 interpolator = intp
-                self.grid = gr
+                # The interpolator(s) are already loaded; only the name is
+                # needed (save() records it as out['model_grid']).
+                self._grid = gr
                 out_file = self.out_folder + '/' + gr + '_out.pkl'
                 print('\t\t\tFITTING MODEL : ' + gr)
                 try:
@@ -1212,7 +1509,8 @@ class Fitter:
             resume=False
         )
         if out_file is None:
-            out_file = f'{self.out_folder}/{self._grid}_out.pkl'
+            out_file = f'{self.out_folder}/{self._out_name()}_out.pkl'
+        self._last_out_file = out_file
         self.save(out_file=out_file)
         pass
 
@@ -1266,9 +1564,17 @@ class Fitter:
                 self.sampler.run_nested(dlogz=self._dlogz)
         results = self.sampler.results
         if out_file is None:
-            out_file = f'{self.out_folder}/{self._grid}_out.pkl'
+            out_file = f'{self.out_folder}/{self._out_name()}_out.pkl'
+        self._last_out_file = out_file
         self.save(out_file, results=results)
         pass
+
+    def _out_name(self):
+        """Name of this fit's grid in outputs: ``'bosz'``, or the pair
+        ``'bosz+tlusty'`` for a single-grid binary fit."""
+        if self._binary and not self._bma:
+            return _pair_name(self._grid, self.grid2)
+        return self._grid
 
     def save(self, out_file, results=None):
         """Save multinest/dynesty output and relevant information.
@@ -1368,13 +1674,26 @@ class Fitter:
             ad_samp = self._get_angular_diameter(rad_samp, dist_samp)
             out['posterior_samples']['AD'] = ad_samp
 
+        if binary:
+            self._add_secondary_derived(out['posterior_samples'])
+            frac2 = np.zeros((posterior_samples.shape[0], len(filts)))
+
         for i in range(posterior_samples.shape[0]):
             theta = build_params(
                 posterior_samples[i, :], flux, flux_er, filts, coordinator,
                 fixed, self.norm)
             out['posterior_samples']['loglike'][i] = log_likelihood(
                 theta, flux, flux_er, wave, filts, interpolator, self.norm,
-                av_law)
+                av_law, binary=binary, contrast=contrast)
+            if binary:
+                m1, m2 = binary_components(theta, filts, wave, interpolator,
+                                           av_law)
+                frac2[i] = m2 / (m1 + m2)
+        if binary:
+            # Fraction of the observed flux from the secondary in each
+            # fitted band (posterior samples; averaged across grids by BMA).
+            for j, f_ in enumerate(filts):
+                out['posterior_samples'][f'frac2_{f_}'] = frac2[:, j]
 
         # A posterior railed against a prior bound looks like a normal fit;
         # say so.
@@ -1438,6 +1757,11 @@ class Fitter:
                 samp = out['posterior_samples']['AD']
                 logdat = out_filler(samp, logdat, 'AD', 'AD', out)
 
+            if binary:
+                for p_ in ('grav_mass2', 'lum2', 'AD2'):
+                    logdat = out_filler(out['posterior_samples'][p_], logdat,
+                                        p_, p_, out)
+
             for i, param in enumerate(order):
                 if not self.coordinator[i]:
                     if 'noise' not in param:
@@ -1450,7 +1774,8 @@ class Fitter:
 
             out['best_fit_averaged']['loglike'] = log_likelihood(
                 best_theta, flux, flux_er, wave,
-                filts, interpolator, self.norm, av_law
+                filts, interpolator, self.norm, av_law,
+                binary=binary, contrast=contrast
             )
 
             # Spectral type
@@ -1464,6 +1789,9 @@ class Fitter:
             spt_idx = np.argmin(abs(mamajek_temp - out['best_fit_averaged']['teff']))
             spt = mamajek_spt[spt_idx]
             out['spectral_type'] = spt
+            if binary:
+                out['spectral_type2'] = mamajek_spt[np.argmin(
+                    abs(mamajek_temp - out['best_fit_averaged']['teff2']))]
 
         # Utilities for plotting.
 
@@ -1473,16 +1801,58 @@ class Fitter:
         out['star'] = self.star
         out['engine'] = self._engine
         out['norm'] = self.norm
-        out['model_grid'] = self.grid
+        out['model_grid'] = self._out_name()
         out['av_law'] = av_law
+        out['binary'] = bool(binary)
+        out['contrast'] = list(self.contrast or []) if binary else []
         if not self.bma:
             with open(log_out, 'w') as logfile:
                 logfile.write(logdat)
+            if binary:
+                self._write_light_fractions(out['posterior_samples'])
             # Predicted observed photometry for the full band set (+ any
             # Fitter.synthetic_filters); BMA does this in save_bma.
             self._write_synthetic(out, out['posterior_samples'])
         pickle.dump(out, open(out_file, 'wb'))
         pass
+
+    def _add_secondary_derived(self, samples):
+        """Add the secondary's gravity mass, luminosity and angular diameter
+        (``grav_mass2``, ``lum2``, ``AD2``) to a samples dict in place."""
+        samples['grav_mass2'] = self._get_mass(samples['logg2'],
+                                               samples['rad2'])
+        samples['lum2'] = self._get_lum(samples['teff2'], samples['rad2'])
+        samples['AD2'] = self._get_angular_diameter(samples['rad2'],
+                                                    samples['dist'])
+
+    def _write_light_fractions(self, samples, fname='binary_light_fractions.dat'):
+        """Per fitted band: the secondary's share of the observed flux and the
+        observed magnitude split into the two components (medians, with the
+        16th-84th percentile range of the light fraction)."""
+        mask = self.star.filter_mask
+        lines = ['# Binary fit: fraction of the observed flux from the '
+                 'secondary in each fitted band,\n'
+                 '# and the observed magnitude split into the components '
+                 '(m1 = m - 2.5 log10(1 - f2), m2 = m - 2.5 log10(f2)).\n'
+                 '# Filter\twavelength_um\tf2_median\tf2_p16\tf2_p84\t'
+                 'mag\tmag1\tmag2\n']
+        for f_, w_, m_ in zip(self.star.filter_names[mask],
+                              self.star.wave[mask], self.star.mags[mask]):
+            k = f'frac2_{f_}'
+            if k not in samples:
+                continue
+            fr = np.asarray(samples[k], dtype=float)
+            fr = fr[np.isfinite(fr)]
+            if not fr.size:
+                continue
+            f50, f16, f84 = np.percentile(fr, [50, 16, 84])
+            with np.errstate(divide='ignore'):
+                m1 = m_ - 2.5 * np.log10(1 - f50)
+                m2 = m_ - 2.5 * np.log10(f50)
+            lines.append(f'{f_}\t{w_:.4f}\t{f50:.4f}\t{f16:.4f}\t'
+                         f'{f84:.4f}\t{m_:.4f}\t{m1:.4f}\t{m2:.4f}\n')
+        with open(f'{self.out_folder}/{fname}', 'w') as fh:
+            fh.write(''.join(lines))
 
     def _synth_thetas(self, samples, n_draws=3000):
         """Posterior draws (subsampled to ``n_draws``) packed as the theta
@@ -1503,8 +1873,11 @@ class Fitter:
         if use_norm:
             return np.column_stack([arrs['teff'], arrs['logg'], arrs['z'],
                                     arrs['norm'], arrs['Av']])[sel]
-        return np.column_stack([arrs['teff'], arrs['logg'], arrs['z'],
-                                arrs['dist'], arrs['rad'], arrs['Av']])[sel]
+        cols = [arrs['teff'], arrs['logg'], arrs['z'], arrs['dist'],
+                arrs['rad'], arrs['Av']]
+        if self._binary:
+            cols += [np.broadcast_to(_col(k), (n,)) for k in BINARY_PARAMS]
+        return np.column_stack(cols)[sel]
 
     def _synthetic_photometry(self, samples, n_draws=3000):
         """Predicted observed photometry for the FULL filter set at the fitted SED.
@@ -1526,10 +1899,16 @@ class Fitter:
         use_norm = self.norm
         av_law = self._av_law
         intp = self.load_interpolator('btsettl')
-        names = [str(f) for f in filter_names]
+        # Only the bands BT-Settl models: it lacks e.g. the IUE / TD-1 bands,
+        # and asking for those raised KeyError, which skipped the whole step.
+        names = [str(f) for f in filter_names if str(f) in intp.column_index]
         wave = np.array([get_effective_wavelength(f) for f in names])
         thetas = self._synth_thetas(samples, n_draws)
-        fl = np.array([model_grid(th, filter_names, wave, intp, use_norm, av_law)
+        # One array object for every draw: sed_library memoises the sliced
+        # grid on the identity of the filter array.
+        band_arr = np.array(names)
+        fl = np.array([model_grid(th, band_arr, wave, intp, use_norm, av_law,
+                                  binary=self._binary)
                        for th in thetas])                 # (ndraws, nbands)
         observed = {str(b) for b in
                     self.star.filter_names[self.star.used_filters == 1]}
@@ -1596,7 +1975,8 @@ class Fitter:
                 wave = np.array([s.wave_um for s in todo])
                 thetas = self._synth_thetas(samples, n_draws)
                 fl = np.array([model_grid(th, names, wave, cube, self.norm,
-                                          self._av_law) for th in thetas])
+                                          self._av_law, binary=self._binary)
+                               for th in thetas])
                 for j, sf in enumerate(todo):
                     c = fl[:, j]
                     c = c[np.isfinite(c) & (c > 0)]
@@ -1767,6 +2147,16 @@ class Fitter:
             out['weighted_samples']['AD'] = ad_samp
             out['weighted_average']['AD'] = ad_average
 
+        if binary:
+            self._add_secondary_derived(out['weighted_samples'])
+            self._add_secondary_derived(out['weighted_average'])
+            # Light fractions: averaged across the grid pairs like any other
+            # sampled quantity (bayesian_model_average).
+            for k, v in avgd['weighted_samples'].items():
+                if k.startswith('frac2_'):
+                    out['weighted_samples'][k] = v
+                    out['weighted_average'][k] = avgd['weighted_average'][k]
+
         # Best fit
         # The logic is as follows:
         # Calculate KDE for each marginalized posterior distributions
@@ -1852,14 +2242,26 @@ class Fitter:
             logdat_average = out_filler(sampw, logdat_average, 'AD', 'AD', out,
                                         method='averaged')
 
+        if binary:
+            for p_ in ('grav_mass2', 'lum2', 'AD2'):
+                logdat_samples = out_filler(
+                    out['weighted_samples'][p_], logdat_samples, p_, p_, out,
+                    method='samples')
+                logdat_average = out_filler(
+                    out['weighted_average'][p_], logdat_average, p_, p_, out,
+                    method='averaged')
+
         # Add estimated age to best fit dictionary. This is done with the wider
         # sampled distribution instead of the averaged one in order to save time
+        # (for a binary: the primary's, from photometry with the secondary's
+        # light removed).
 
         if self.estimate_age:
             age_samp, mass_samp, eep_samp = self._run_estimate_age(
                 out['best_fit_samples'],
                 out['uncertainties_samples'],
-                c=choice(self.colors)
+                c=choice(self.colors),
+                samples=out['weighted_samples']
             )
             # Create new thingy for MIST samples. Sadly now everything done before
             # this update will be incompatible :(
@@ -1937,6 +2339,8 @@ class Fitter:
         out['norm'] = self.norm
         out['engine'] = 'Bayesian Model Averaging'
         out['av_law'] = av_law
+        out['binary'] = bool(binary)
+        out['contrast'] = list(self.contrast or []) if binary else []
 
         # Spectral type
 
@@ -1952,6 +2356,10 @@ class Fitter:
             abs(mamajek_temp - out['best_fit_averaged']['teff']))
         spt = mamajek_spt[spt_idx]
         out['spectral_type'] = spt
+        if binary:
+            out['spectral_type2'] = mamajek_spt[np.argmin(
+                abs(mamajek_temp - out['best_fit_averaged']['teff2']))]
+            self._write_light_fractions(out['weighted_samples'])
         out_file = f'{self.out_folder}/BMA.pkl'
         with open(log_out_samples, 'w') as logfile:
             logfile.write(logdat_samples)
@@ -2112,39 +2520,9 @@ class Fitter:
     @staticmethod
     def load_interpolator(model):
         """Load a DFInterpolator."""
-        if model.lower() == 'phoenix':
-            with open(gridsdir + '/Phoenixv2_DF.pkl', 'rb') as intp:
-                df = DFInterpolator(pd.read_pickle(intp))
-        elif model.lower() == 'btsettl':
-            with open(gridsdir + '/BTSettl_DF.pkl', 'rb') as intp:
-                df = DFInterpolator(pd.read_pickle(intp))
-        elif model.lower() == 'btnextgen':
-            with open(gridsdir + '/BTNextGen_DF.pkl', 'rb') as inp:
-                df = DFInterpolator(pd.read_pickle(inp))
-        elif model.lower() == 'btcond':
-            with open(gridsdir + '/BTCond_DF.pkl', 'rb') as intp:
-                df = DFInterpolator(pd.read_pickle(intp))
-        elif model.lower() == 'ck04':
-            with open(gridsdir + '/CK04_DF.pkl', 'rb') as intp:
-                df = DFInterpolator(pd.read_pickle(intp))
-        elif model.lower() == 'kurucz':
-            with open(gridsdir + '/Kurucz_DF.pkl', 'rb') as intp:
-                df = DFInterpolator(pd.read_pickle(intp))
-        elif model.lower() == 'coelho':
-            with open(gridsdir + '/Coelho_DF.pkl', 'rb') as intp:
-                df = DFInterpolator(pd.read_pickle(intp))
-        elif model.lower() == 'bosz':
-            with open(gridsdir + '/BOSZ_DF.pkl', 'rb') as intp:
-                df = DFInterpolator(pd.read_pickle(intp))
-        elif model.lower() == 'sphinx':
-            with open(gridsdir + '/SPHINX_DF.pkl', 'rb') as intp:
-                df = DFInterpolator(pd.read_pickle(intp))
-        elif model.lower() == 'tlusty':
-            with open(gridsdir + '/TLUSTY_DF.pkl', 'rb') as intp:
-                df = DFInterpolator(pd.read_pickle(intp))
-        return df
+        return load_band_grid(model)
 
-    def _run_estimate_age(self, bf, unc, c='white'):
+    def _run_estimate_age(self, bf, unc, c='white', samples=None):
         """Estimate age using MIST isochrones.
 
         Parameters
@@ -2162,7 +2540,8 @@ class Fitter:
         )
         params = dict()  # params for isochrones.
         for i, k in enumerate(order):
-            if k == 'logg' or 'noise' in k:
+            # The secondary of a binary (teff2, ...) is not fitted to MIST.
+            if k == 'logg' or 'noise' in k or k in BINARY_PARAMS:
                 continue
             if k == 'teff':
                 par = 'Teff'
@@ -2191,11 +2570,26 @@ class Fitter:
                               abs(np.log10(max(unc['lum']))))
         mags = self.star.mags[iso_mask == 1]
         mags_e = self.star.mag_errs[iso_mask == 1]
+        names = self.star.filter_names[iso_mask == 1]
         used_bands = []
-        for m, e, b in zip(mags, mags_e, iso_bands):
-            if m != 0:
-                params[b] = (m, e)
-                used_bands.append(b)
+        for m, e, b, fn in zip(mags, mags_e, iso_bands, names):
+            if m == 0:
+                continue
+            if self._binary:
+                # The primary's magnitude: remove the secondary's share of
+                # the light (posterior), and add its spread to the error. A
+                # band without a light fraction (not fitted) is left out.
+                fr = (samples or {}).get(f'frac2_{fn}')
+                if fr is None:
+                    continue
+                fr = np.asarray(fr, dtype=float)
+                fr = fr[np.isfinite(fr) & (fr < 1)]
+                if fr.size < 10:
+                    continue
+                m1 = m - 2.5 * np.log10(1 - fr)
+                m, e = float(np.median(m1)), float(np.hypot(e, np.std(m1)))
+            params[b] = (m, e)
+            used_bands.append(b)
 
         age_samp, mass_samp, eep_samp = estimate(
             used_bands, params, logg=False,
@@ -2247,6 +2641,10 @@ class Fitter:
             'lum': 'luminosity',
             'dist': 'distance',
             'Av': 'Av',
+            'teff2': 'Teff2',
+            'logg2': 'logg2',
+            'rad2': 'radius2',
+            'lum2': 'luminosity2',
         }
 
         posterior = {}
@@ -2461,7 +2859,8 @@ def dynesty_loglike_bma(cube, interpolator):
         cube, flux, flux_er, filts, coordinator, fixed, use_norm
     )
     return log_likelihood(theta, flux, flux_er, wave,
-                          filts, interpolator, use_norm, av_law)
+                          filts, interpolator, use_norm, av_law,
+                          binary=binary, contrast=contrast)
 
 
 def dynesty_log_like(cube):
@@ -2470,13 +2869,14 @@ def dynesty_log_like(cube):
         cube, flux, flux_er, filts, coordinator, fixed, use_norm
     )
     return log_likelihood(theta, flux, flux_er, wave,
-                          filts, interpolator, use_norm, av_law)
+                          filts, interpolator, use_norm, av_law,
+                          binary=binary, contrast=contrast)
 
 
 def pt_dynesty(cube):
     """Dynesty prior transform."""
     return prior_transform_dynesty(cube, flux, flux_er, filts, prior_dict,
-                                   coordinator, use_norm)
+                                   coordinator, use_norm, binary)
 
 
 def multinest_log_like(cube, ndim, nparams):

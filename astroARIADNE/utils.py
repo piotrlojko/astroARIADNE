@@ -220,22 +220,34 @@ def display_routine(engine, live_points, dlogz, ndim, bound=None, sample=None,
     pass
 
 
-def end(coordinator, elapsed_time, out_folder, engine, use_norm):
-    """Display end of run information."""
+def end(coordinator, elapsed_time, out_folder, engine, use_norm,
+        out_file=None):
+    """Display end of run information.
+
+    ``out_file`` is the single-grid fit's output pickle (``<grid>_out.pkl``);
+    a BMA run reads ``BMA.pkl``.
+    """
     c = random.choice(colors)
     _T = '\t\t\t'
 
-    if use_norm:
-        order = np.array(['teff', 'logg', 'z', 'norm', 'rad', 'Av'])
-    else:
-        order = np.array(['teff', 'logg', 'z', 'dist', 'rad', 'Av'])
-
     if engine == 'Bayesian Model Averaging':
         res_dir = f'{out_folder}/BMA.pkl'
+    elif out_file is not None:
+        res_dir = out_file
     else:
         res_dir = f'{out_folder}/{engine}_out.pkl'
     with closing(open(res_dir, 'rb')) as jar:
         out = pickle.load(jar)
+    binary = bool(out.get('binary', False))
+
+    # Same layout as the fit's parameter vector (``coordinator``): the
+    # binary's secondary parameters follow Av.
+    if use_norm:
+        order = np.array(['teff', 'logg', 'z', 'norm', 'Av'])
+    else:
+        order = np.array(['teff', 'logg', 'z', 'dist', 'rad', 'Av'])
+    if binary:
+        order = np.append(order, ['teff2', 'logg2', 'rad2'])
 
     star = out['star']
     mask = star.filter_mask
@@ -250,6 +262,9 @@ def end(coordinator, elapsed_time, out_folder, engine, use_norm):
         'Av': 'Av (mag)', 'grav_mass': 'Grav. mass (Msun)',
         'lum': 'Luminosity (Lsun)', 'AD': 'Ang. diameter (mas)',
         'iso_mass': 'Iso. mass (Msun)', 'age': 'Age (Gyr)', 'eep': 'EEP',
+        'teff2': 'Teff 2 (K)', 'logg2': 'log(g) 2 (dex)',
+        'rad2': 'Radius 2 (Rsun)', 'grav_mass2': 'Grav. mass 2 (Msun)',
+        'lum2': 'Luminosity 2 (Lsun)', 'AD2': 'Ang. diameter 2 (mas)',
     }
 
     def _fmt_row(name, med, unc=None, ci=None, fmt='g'):
@@ -291,9 +306,13 @@ def end(coordinator, elapsed_time, out_folder, engine, use_norm):
 
     # Derived parameters
     derived = []
-    if not use_norm:
+    if use_norm:
+        derived.append('rad')
+    else:
         derived.append('AD')
     derived.extend(['grav_mass', 'lum'])
+    if binary:
+        derived.extend(['AD2', 'grav_mass2', 'lum2'])
     if engine == 'Bayesian Model Averaging':
         derived.extend(['iso_mass', 'age', 'eep'])
 
@@ -309,6 +328,9 @@ def end(coordinator, elapsed_time, out_folder, engine, use_norm):
     # Spectral type
     spt = out['spectral_type']
     print(colored(f'{_T}{"Spectral type":24s}  {spt:>12s}', c))
+    if binary and 'spectral_type2' in out:
+        spt2 = out['spectral_type2']
+        print(colored(f'{_T}{"Spectral type 2":24s}  {spt2:>12s}', c))
 
     # Noise parameters
     print()
@@ -327,7 +349,10 @@ def end(coordinator, elapsed_time, out_folder, engine, use_norm):
         med = out['best_fit_averaged'][p]
         unc = out['uncertainties_averaged'][p]
         ci = out['confidence_interval_averaged'][p]
-        print(colored(_fmt_row(name, med, unc, ci), c))
+        if np.ndim(unc) == 0:            # fixed in prior_setup
+            print(colored(_fmt_row(name, med), c))
+        else:
+            print(colored(_fmt_row(name, med, unc, ci), c))
 
     # Model weights / evidence
     print()

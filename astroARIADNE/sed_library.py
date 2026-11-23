@@ -120,7 +120,11 @@ def _grid_arrays(interp, filts):
     is a single nogil numba call. Memoised on object identity to avoid building
     keys on each call; references are held so ids cannot be reused.
     """
-    cached = _GRID_CACHE.get(id(interp))
+    # Keyed by (interpolator, filter array): a binary fit asks the same grid
+    # for several filter sets (fitted bands, flux-ratio bands), and a
+    # one-slot-per-grid cache would rebuild the cube on every alternation.
+    key = (id(interp), id(filts))
+    cached = _GRID_CACHE.get(key)
     if (cached is not None and cached[0] is interp and cached[1] is filts):
         return cached[2]
     ii0, ii1, ii2 = interp.index_columns
@@ -132,7 +136,9 @@ def _grid_arrays(interp, filts):
         np.ascontiguousarray(ii2, dtype=np.float64),
         cube,
     )
-    _GRID_CACHE[id(interp)] = (interp, filts, arrays)
+    if len(_GRID_CACHE) >= 32:          # bounded: drop the oldest slice
+        _GRID_CACHE.pop(next(iter(_GRID_CACHE)))
+    _GRID_CACHE[key] = (interp, filts, arrays)
     return arrays
 
 
@@ -193,22 +199,36 @@ def _free_param_transforms(prior_dict, coordinator, order):
     return transforms
 
 
-def _param_order(filts, use_norm):
+BINARY_PARAMS = ('teff2', 'logg2', 'rad2')
+
+
+def _param_order(filts, use_norm, binary=False):
     """Return (and cache) the full parameter-name order for a filter set.
 
-    Memoised on ``use_norm`` with an identity check on ``filts`` to avoid
-    building ``tuple(filts)`` on every call.
+    Memoised on ``(use_norm, binary)`` with an identity check on ``filts`` to
+    avoid building ``tuple(filts)`` on every call.
+
+    A binary fit (``binary=True``, which requires ``use_norm=False``) appends
+    the secondary's ``teff2, logg2, rad2`` after ``Av``; the two components
+    share ``z``, ``dist`` and ``Av``.
     """
-    cached = _ORDER_CACHE.get(use_norm)
+    cached = _ORDER_CACHE.get((use_norm, binary))
     if cached is not None and cached[0] is filts:
         return cached[1]
     if use_norm:
         base = ['teff', 'logg', 'z', 'norm', 'Av']
     else:
         base = ['teff', 'logg', 'z', 'dist', 'rad', 'Av']
+    if binary:
+        base = base + list(BINARY_PARAMS)
     order = np.array(base + [get_noise_name(f) + '_noise' for f in filts])
-    _ORDER_CACHE[use_norm] = (filts, order)
+    _ORDER_CACHE[(use_norm, binary)] = (filts, order)
     return order
+
+
+def n_physical(use_norm, binary=False):
+    """Number of non-noise parameters ahead of the per-band noise terms."""
+    return (5 if use_norm else 6) + (len(BINARY_PARAMS) if binary else 0)
 
 
 def _ext_attenuation_base(wave, av_law):
@@ -267,7 +287,16 @@ def get_interpolated_flux(temp, logg, z, filts, interpolators):
     return _trilinear3d(logg, temp, z, ii0, ii1, ii2, cube)
 
 
-def model_grid(theta, filts, wave, interpolators, use_norm, av_law):
+def _pair(interpolators):
+    """(primary, secondary) interpolators of a binary fit: a 2-tuple/list as
+    given, or the same grid for both components."""
+    if isinstance(interpolators, (tuple, list)):
+        return interpolators[0], interpolators[1]
+    return interpolators, interpolators
+
+
+def model_grid(theta, filts, wave, interpolators, use_norm, av_law,
+               binary=False):
     """Return the model grid in the selected filters.
 
     Parameters:
@@ -281,6 +310,11 @@ def model_grid(theta, filts, wave, interpolators, use_norm, av_law):
     use_norm : bool
         False for a full fit  (including radius and distance). True to fit
         for a normalization constant instead.
+    binary : bool
+        If True, add a second star (``teff2, logg2, rad2`` in ``theta[6:9]``)
+        sharing the primary's z, distance and extinction. ``interpolators``
+        is then a ``(primary, secondary)`` pair of grids (or one grid used for
+        both). Requires ``use_norm=False``.
 
     Returns
     -------
@@ -289,6 +323,9 @@ def model_grid(theta, filts, wave, interpolators, use_norm, av_law):
         interpolated fluxes
 
     """
+    if binary:
+        m1, m2 = binary_components(theta, filts, wave, interpolators, av_law)
+        return m1 + m2
     if use_norm:
         teff, logg, z, norm, Av = theta[:5]
     else:
@@ -306,29 +343,82 @@ def model_grid(theta, filts, wave, interpolators, use_norm, av_law):
     return model
 
 
+def binary_components(theta, filts, wave, interpolators, av_law):
+    """Observed (extincted, distance-scaled) fluxes of the two components.
+
+    ``theta`` is ``[teff, logg, z, dist, rad, Av, teff2, logg2, rad2, ...]``;
+    the components share ``z``, ``dist`` and ``Av`` and each scales as
+    ``(R / d)^2``. ``interpolators`` is a ``(primary, secondary)`` pair (or
+    one grid for both). Returns ``(model1, model2)``.
+    """
+    teff, logg, z, dist, rad, Av, teff2, logg2, rad2 = theta[:9]
+    dist = dist * 4.435e+7  # pc -> solRad
+    i1, i2 = _pair(interpolators)
+    atten = _ext_attenuation_base(wave, av_law) ** Av
+    f1 = get_interpolated_flux(teff, logg, z, filts, i1)
+    f2 = get_interpolated_flux(teff2, logg2, z, filts, i2)
+    return (f1 * atten * (rad / dist) ** 2,
+            f2 * atten * (rad2 / dist) ** 2)
+
+
 def get_residuals(theta, flux, flux_er, wave, filts, interpolators, use_norm,
-                  av_law):
+                  av_law, binary=False):
     """Calculate residuals of the model."""
-    model = model_grid(theta, filts, wave, interpolators, use_norm, av_law)
-    start = 5 if use_norm else 6
+    model = model_grid(theta, filts, wave, interpolators, use_norm, av_law,
+                       binary=binary)
+    start = n_physical(use_norm, binary)
     inflation = theta[start:]
     residuals = flux - model
     errs = np.sqrt(flux_er ** 2 + inflation ** 2)
     return residuals, errs
 
 
+def contrast_model(theta, interpolators, cfilts):
+    """Model magnitude difference ``m2 - m1`` of the components in ``cfilts``.
+
+    ``-2.5 log10[(rad2 / rad1)^2 F2 / F1]``: distance and the shared
+    extinction cancel in the ratio, so it depends on the two stars only.
+    Positive where the secondary is the fainter one.
+    """
+    teff, logg, z, rad = theta[0], theta[1], theta[2], theta[4]
+    teff2, logg2, rad2 = theta[6], theta[7], theta[8]
+    i1, i2 = _pair(interpolators)
+    f1 = get_interpolated_flux(teff, logg, z, cfilts, i1)
+    f2 = get_interpolated_flux(teff2, logg2, z, cfilts, i2)
+    return -2.5 * np.log10((rad2 / rad) ** 2 * f2 / f1)
+
+
+def contrast_loglike(theta, interpolators, contrast):
+    """Gaussian log-likelihood of measured component contrasts.
+
+    ``contrast`` is ``(cfilts, dmags, sigmas)``: band names, the measured
+    ``m2 - m1`` (e.g. from speckle / AO imaging or a spectroscopic light
+    ratio) and its uncertainty.
+    """
+    cfilts, dmags, sigmas = contrast
+    dm = contrast_model(theta, interpolators, cfilts)
+    return -0.5 * (((dm - dmags) / sigmas) ** 2).sum()
+
+
 def log_likelihood(theta, flux, flux_er, wave, filts, interpolators, use_norm,
-                   av_law):
+                   av_law, binary=False, contrast=None):
     """Calculate log likelihood of the model."""
     res, ers = get_residuals(theta, flux, flux_er, wave,
-                             filts, interpolators, use_norm, av_law)
+                             filts, interpolators, use_norm, av_law,
+                             binary=binary)
 
     lnl = fast_loglik(res, ers)
 
     if not np.isfinite(lnl):
         return -1e300
 
-    return -.5 * lnl
+    ll = -.5 * lnl
+    if binary and contrast is not None:
+        c = contrast_loglike(theta, interpolators, contrast)
+        if not np.isfinite(c):
+            return -1e300
+        ll += c
+    return ll
 
 
 @nb.njit(cache=True)
@@ -340,10 +430,10 @@ def fast_loglik(res, ers):
 
 
 def prior_transform_dynesty(u, flux, flux_er, filts, prior_dict, coordinator,
-                            use_norm):
+                            use_norm, binary=False):
     """Transform the prior from the unit cube to the parameter space."""
     u2 = np.array(u)
-    order = _param_order(filts, use_norm)
+    order = _param_order(filts, use_norm, binary)
     transforms = _free_param_transforms(prior_dict, coordinator, order)
     for i, transform in enumerate(transforms):
         u2[i] = transform(u2[i])
@@ -351,9 +441,41 @@ def prior_transform_dynesty(u, flux, flux_er, filts, prior_dict, coordinator,
 
 
 def prior_transform_multinest(u, flux, flux_er, filts, prior_dict, coordinator,
-                              use_norm):
+                              use_norm, binary=False):
     """Transform the prior from the unit cube to the parameter space."""
-    order = _param_order(filts, use_norm)
+    order = _param_order(filts, use_norm, binary)
     transforms = _free_param_transforms(prior_dict, coordinator, order)
     for i, transform in enumerate(transforms):
         u[i] = transform(u[i])
+
+
+# Band-grid file of every model grid (Datafiles/model_grids).
+GRID_FILES = {
+    'phoenix': 'Phoenixv2_DF.pkl', 'btsettl': 'BTSettl_DF.pkl',
+    'btnextgen': 'BTNextGen_DF.pkl', 'btcond': 'BTCond_DF.pkl',
+    'ck04': 'CK04_DF.pkl', 'kurucz': 'Kurucz_DF.pkl',
+    'coelho': 'Coelho_DF.pkl', 'bosz': 'BOSZ_DF.pkl',
+    'sphinx': 'SPHINX_DF.pkl', 'tlusty': 'TLUSTY_DF.pkl',
+}
+
+
+def load_band_grid(name):
+    """The ``DFInterpolator`` of model grid ``name`` (e.g. ``'bosz'``)."""
+    import pandas as pd
+    from isochrones.interp import DFInterpolator
+    from .config import gridsdir
+    fn = GRID_FILES.get(str(name).lower())
+    if fn is None:
+        raise ValueError(f'unknown model grid {name!r}; known grids: '
+                         f'{", ".join(GRID_FILES)}')
+    with open(f'{gridsdir}/{fn}', 'rb') as fh:
+        return DFInterpolator(pd.read_pickle(fh))
+
+
+def split_grid_name(name):
+    """``('bosz', 'tlusty')`` for a binary grid pair named ``'bosz+tlusty'``,
+    ``(name, None)`` for a single grid."""
+    parts = str(name).split('+')
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return str(name), None

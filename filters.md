@@ -69,6 +69,38 @@ included. No catalogue query feeds them, so add the photometry yourself through
 A model grid that does not reach a band leaves it out of that grid's fit (for
 example Sonora below 0.4 um).
 
+## Ultraviolet: IUE and TD-1
+
+Seven IUE boxes and the four TD-1 (S2/68) wide bands can be fitted:
+
+- IUE: `IUE_IUE.1250-1300`, `IUE_IUE.1450-1500`, `IUE_IUE.1675-1725`,
+  `IUE_IUE.2150-2200`, `IUE_IUE.2395-2445`, `IUE_IUE.2900-2950`,
+  `IUE_IUE.2900-3000` (mean flux in the given range, in Angstrom)
+- TD-1: `TD1_WIDE.1565`, `TD1_WIDE.1965`, `TD1_WIDE.2365`, `TD1_WIDE.2740`
+
+Only the **BOSZ** (2800-16000 K) and **TLUSTY** (15000-55000 K) grids have
+model fluxes in these bands; they were convolved from the same BOSZ 2024 and
+TLUSTY spectra the grids were built from. In a BMA fit that uses one of these
+bands, every other grid is left out with a warning, so include `'bosz'` (or,
+for O/B stars, run `'tlusty'` standalone). A standalone fit with another grid
+stops with an error naming the grids that have the bands.
+
+These bands are usually published as fluxes, so add them with `flux_dict` or
+`Star.add_flux`:
+
+```python
+import astropy.units as u
+flam = u.erg / (u.s * u.cm**2 * u.AA)
+s = Star('my star', ra, dec, temp=11500, temp_e=0,
+         flux_dict={'TD1_WIDE.1565': (5.25e-12 * flam, 4.9e-13 * flam),
+                    'IUE_IUE.1250-1300': (4.57e-12 * flam, 1.83e-13 * flam)})
+```
+
+The BMA chooses its grids from `star.temp`. When Gaia has no temperature for
+the star (`star.temp = -1`), BOSZ is gated out, so pass a rough `temp` (with
+`temp_e=0`, so it does not also constrain the isochrone fit) as above.
+Magnitudes in these bands are read as Vega magnitudes.
+
 ## Magnitude systems
 
 PanSTARRS, SDSS, GALEX and SkyMapper magnitudes are read as AB, and every other

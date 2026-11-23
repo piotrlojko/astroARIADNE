@@ -17,8 +17,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the band's magnitude system, so the fit uses exactly the given flux.
   `flux_dict` can be combined with `mag_dict`. The conversion is available as
   `phot_utils.flux_density_to_flux` / `flux_density_to_mag`.
+- **BOSZ and TLUSTY spectra in the spectra cache.** `tools/extend_spectra_cache.py`
+  downloads the spectra of every node of the bundled BOSZ grid (BOSZ 2024,
+  MAST, R = 2000, solar alpha and carbon, v_micro = 2 km/s, MARCS where MARCS
+  and ATLAS9 overlap) and TLUSTY grid (OSTAR2002 + BSTAR2006 merged, SVO
+  Theory Server), checks that they reproduce those grids, and adds them to
+  `spectra_cache.h5` as the groups `bosz` and `tlusty` (R = 1500 for BOSZ,
+  0.10-4.63 um). The cache then covers the whole BOSZ (2800-16000 K,
+  log g -0.5 to 5.5) and TLUSTY (15000-55000 K, log g 1.75-4.75) grids, and
+  `plot_SED` draws their model spectra.
+- **Binary (two-star) SED fits.** `Fitter.binary = True` fits the photometry as
+  the sum of two stars sharing distance, extinction and [Fe/H], each with its
+  own Teff, log g and radius (`teff2`, `logg2`, `rad2`). Each component can use
+  its own grid (`Fitter.grid2`; in BMA `Fitter.models2`, with every primary x
+  secondary pair fitted and averaged, e.g. `bosz+tlusty`), and measured
+  contrasts can be added with `Fitter.add_contrast(band, m2 - m1, sigma)`.
+  Outputs: the secondary's parameters and `grav_mass2`, `lum2`, `AD2`, its
+  spectral type, the per-band light fractions (`binary_light_fractions.dat`,
+  `frac2_<band>` samples), and a MIST age and mass for the primary from the
+  photometry with the secondary's light removed. The SED plot shows both
+  components and their sum; the HR diagram marks the secondary. Single-star
+  fits are unchanged. See the README.
+- **The IUE and TD-1 ultraviolet bands can be fitted.** The BOSZ and TLUSTY
+  grids gain model fluxes in the seven IUE boxes and four TD-1 wide bands,
+  convolved from the same spectra. See `filters.md`.
 
 ### Changed
+- **A BMA fit leaves out grids that lack a fitted band**, with a warning, and
+  a standalone fit with such a grid stops with an error naming the grids that
+  have the band. Before, fitting a band a grid had no column for (the IUE and
+  TD-1 bands, for every grid) failed with a `KeyError` inside the sampler.
 - **isochrones comes from the piotrlojko/isochrones fork.** The dependency is
   now `isochrones @ git+https://github.com/piotrlojko/isochrones.git@master`
   (isochrones 2.2.0, which runs on numpy 2, pandas 3 and Python 3.14 and falls
@@ -35,6 +63,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failing MIST isochrone evaluation now warns instead of silently giving NaN
   age, mass and EEP.
 - The IUE and TD1 UV filter curves are now part of the repository.
+- `synthetic_magnitudes.dat` and `synthetic_fluxes.dat` were empty: the
+  prediction asked the BT-Settl grid for the IUE and TD-1 bands, which it does
+  not have, and the resulting `KeyError` skipped the whole step with only a
+  log warning. It now predicts the bands BT-Settl has.
+- `SEDPlotter` could not open a single-grid fit (`Fitter.fit()`): it required
+  the BMA-only `best_fit_samples`. It now uses the single fit's summary and
+  posterior samples.
+- The summary printed after a single-grid fit looked for `<engine>_out.pkl`
+  instead of the `<grid>_out.pkl` the fit wrote, and it crashed on a noise term
+  fixed in `prior_setup`. The summary of a normalisation (`norm = True`) fit
+  also listed the parameters against the wrong fixed/free flags.
+- The BMA histograms ran out of colours with more than six grids.
+- `mags.dat` and `print_mags` cut band names to 16 characters
+  (`IUE_IUE.1250-130`, `HST_ACS_WFC_F850L`); they are written in full now.
+- The SED plots started at 0.25 um unless GALEX was fitted, hiding fitted
+  bands bluer than that (IUE, TD-1, HST F218W/F225W); the axis now starts
+  blueward of the bluest fitted band.
+- Looking a model spectrum up in the spectra cache failed when the nearest
+  cached Teff, log g and [Fe/H] values did not form an existing node (possible
+  on sparse grids such as TLUSTY); it now takes the nearest node that exists.
 
 ## [1.6.0] - 2026-11-20
 

@@ -501,10 +501,13 @@ class Star:
                                       self.irx_filter_mask).astype(int)]
         filt = self.filter_names[np.append(self.filter_mask,
                                            self.irx_filter_mask).astype(int)]
+        # Wide enough for the longest band name (HST and IUE names exceed the
+        # 16 characters this used to allow, which truncated them in mags.dat).
+        width = max([16] + [len(str(f)) for f in self.filter_names])
         master = np.zeros(
             mags.size,
             dtype=[
-                ('var1', 'U16'),
+                ('var1', f'U{width}'),
                 ('var2', float),
                 ('var3', float)
             ])

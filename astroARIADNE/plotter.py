@@ -133,6 +133,7 @@ class SEDPlotter:
             self.coordinator = out['coordinator']
             self.fixed = out['fixed']
             self.norm = out['norm']
+            self.binary = bool(out.get('binary', False))
             if model is None:
                 if self.engine != 'Bayesian Model Averaging':
                     self.grid = out['model_grid']
@@ -145,6 +146,13 @@ class SEDPlotter:
                     self.grid = grid
             else:
                 self.grid = model
+            # A binary fit's grid is a pair, e.g. 'bosz+tlusty'.
+            self.grid_name = self.grid
+            if self.binary:
+                g1, g2 = split_grid_name(self.grid)
+                self.grid, self.grid2 = g1, (g2 or g1)
+            else:
+                self.grid2 = None
             self.av_law = out['av_law']
 
             # Create target folders
@@ -165,6 +173,8 @@ class SEDPlotter:
             else:
                 self.order = np.array(
                     ['teff', 'logg', 'z', 'norm', 'Av'])
+            if self.binary:
+                self.order = np.append(self.order, BINARY_PARAMS)
 
             mask = self.star.filter_mask
             flxs = self.star.flux[mask]
@@ -179,59 +189,47 @@ class SEDPlotter:
                 p_ = get_noise_name(filt) + '_noise'
                 self.order = np.append(self.order, p_)
 
-            if self.grid.lower() == 'phoenix':
-                with open(gridsdir + '/Phoenixv2_DF.pkl', 'rb') as intp:
-                    self.interpolator = DFInterpolator(pd.read_pickle(intp))
-            if self.grid.lower() == 'btsettl':
-                with open(gridsdir + '/BTSettl_DF.pkl', 'rb') as intp:
-                    self.interpolator = DFInterpolator(pd.read_pickle(intp))
-            if self.grid.lower() == 'btnextgen':
-                with open(gridsdir + '/BTNextGen_DF.pkl', 'rb') as intp:
-                    self.interpolator = DFInterpolator(pd.read_pickle(intp))
-            if self.grid.lower() == 'btcond':
-                with open(gridsdir + '/BTCond_DF.pkl', 'rb') as intp:
-                    self.interpolator = DFInterpolator(pd.read_pickle(intp))
-            if self.grid.lower() == 'ck04':
-                with open(gridsdir + '/CK04_DF.pkl', 'rb') as intp:
-                    self.interpolator = DFInterpolator(pd.read_pickle(intp))
-            if self.grid.lower() == 'kurucz':
-                with open(gridsdir + '/Kurucz_DF.pkl', 'rb') as intp:
-                    self.interpolator = DFInterpolator(pd.read_pickle(intp))
-            if self.grid.lower() == 'coelho':
-                with open(gridsdir + '/Coelho_DF.pkl', 'rb') as intp:
-                    self.interpolator = DFInterpolator(pd.read_pickle(intp))
-            if self.grid.lower() == 'bosz':
-                with open(gridsdir + '/BOSZ_DF.pkl', 'rb') as intp:
-                    self.interpolator = DFInterpolator(pd.read_pickle(intp))
-            if self.grid.lower() == 'sphinx':
-                with open(gridsdir + '/SPHINX_DF.pkl', 'rb') as intp:
-                    self.interpolator = DFInterpolator(pd.read_pickle(intp))
-            if self.grid.lower() == 'tlusty':
-                with open(gridsdir + '/TLUSTY_DF.pkl', 'rb') as intp:
-                    self.interpolator = DFInterpolator(pd.read_pickle(intp))
+            self.interpolator = load_band_grid(self.grid)
+            if self.binary:
+                self.interpolator = (self.interpolator,
+                                     load_band_grid(self.grid2))
 
-            # Get best fit parameters.
+            # Get best fit parameters. A single-grid fit has no BMA
+            # 'samples' summary; its one summary serves both methods.
+            bf_avg = out['best_fit_averaged']
+            bf_sam = out.get('best_fit_samples', bf_avg)
+            if 'uncertainties_samples' not in out:
+                for k in ('best_fit', 'uncertainties', 'confidence_interval'):
+                    out.setdefault(f'{k}_samples', out[f'{k}_averaged'])
             theta_samples = np.zeros(self.order.shape[0])
             theta_average = np.zeros(self.order.shape[0])
             for i, param in enumerate(self.order):
                 if param != 'inflation':
-                    theta_samples[i] = out['best_fit_samples'][param]
-                    theta_average[i] = out['best_fit_averaged'][param]
+                    theta_samples[i] = bf_sam[param]
+                    theta_average[i] = bf_avg[param]
+            if self.binary:
+                # The secondary's Teff and radius are strongly correlated
+                # (a hotter, smaller star gives the same UV flux), so the
+                # per-parameter best values need not form a good model.
+                # Plot the highest-likelihood posterior sample instead.
+                theta_ml = self._max_like_theta()
+                if theta_ml is not None:
+                    theta_samples = theta_average = theta_ml
 
             # Calculate best fit model.
             model_samples = model_grid(theta_samples, filters, wave,
                                        self.interpolator, self.norm,
-                                       self.av_law)
+                                       self.av_law, binary=self.binary)
             model_average = model_grid(theta_average, filters, wave,
                                        self.interpolator, self.norm,
-                                       self.av_law)
+                                       self.av_law, binary=self.binary)
             if self.irx:
                 irx_model_sam = model_grid(theta_samples, irx_filt, irx_wave,
                                            self.interpolator, self.norm,
-                                           self.av_law)
+                                           self.av_law, binary=self.binary)
                 irx_model_avg = model_grid(theta_average, irx_filt, irx_wave,
                                            self.interpolator, self.norm,
-                                           self.av_law)
+                                           self.av_law, binary=self.binary)
             if method == 'averaged':
                 self.theta = theta_average
                 self.model = model_average
@@ -251,6 +249,27 @@ class SEDPlotter:
         # Setup plots.
         self.__read_config()
         print('\nPlotter initialized.\n')
+
+    def _max_like_theta(self):
+        """Parameter vector (``self.order``) of the highest-likelihood
+        posterior sample of the plotted grid (pair), or None."""
+        if self.bma:
+            samples = self.out.get('originals', {}).get(self.grid_name)
+        else:
+            samples = self.out.get('posterior_samples')
+        if not samples or 'loglike' not in samples:
+            return None
+        ll = np.asarray(samples['loglike'], dtype=float)
+        if not ll.size or not np.isfinite(ll).any():
+            return None
+        i = int(np.nanargmax(ll))
+        theta = np.zeros(self.order.shape[0])
+        for j, param in enumerate(self.order):
+            v = samples[param]
+            theta[j] = v[i] if np.ndim(v) else v
+        logger.info('Binary fit: plotting the highest-likelihood posterior '
+                    'sample of %s', self.grid_name)
+        return theta
 
     def __extract_info(self):
         self.flux = []
@@ -299,17 +318,19 @@ class SEDPlotter:
         self.irx_wave = np.array(self.irx_wave)
         self.irx_bandpass = np.array(self.irx_bandpass).T
 
-    def _load_from_cache(self, model_key):
-        """Return (wavelength, flux) from pre-computed HDF5 cache, or None."""
+    def _load_from_cache(self, model_key, teff=None, logg=None, z=None):
+        """Return (wavelength, flux) from pre-computed HDF5 cache, or None.
+
+        At ``teff``, ``logg``, ``z`` (default: the primary's best fit)."""
         if not spectra_cache:
             return None
         import h5py
         import os as _os
         if not _os.path.isfile(spectra_cache):
             return None
-        teff = self.theta[0]
-        logg = self.theta[1]
-        z = self.theta[2]
+        teff = self.theta[0] if teff is None else teff
+        logg = self.theta[1] if logg is None else logg
+        z = self.theta[2] if z is None else z
         try:
             with h5py.File(spectra_cache, 'r') as f:
                 if model_key not in f:
@@ -322,13 +343,33 @@ class SEDPlotter:
                 l_val = np.unique(loggs)[np.argmin(np.abs(np.unique(loggs) - logg))]
                 z_val = np.unique(zs)[np.argmin(np.abs(np.unique(zs) - z))]
                 mask = (teffs == t_val) & (loggs == l_val) & (zs == z_val)
-                idx = np.where(mask)[0][0]
+                if mask.any():
+                    idx = np.where(mask)[0][0]
+                else:
+                    # Sparse grids (e.g. TLUSTY, whose lowest log g rises
+                    # with Teff) need not hold the per-axis nearest
+                    # combination: take the nearest node that exists, with
+                    # Teff in relative units and log g / [Fe/H] in dex.
+                    d2 = (((teffs - teff) / teff / 0.05) ** 2
+                          + ((loggs - logg) / 0.5) ** 2
+                          + ((zs - z) / 0.5) ** 2)
+                    idx = int(np.argmin(d2))
                 wave = g['wavelength'][:]
                 flux = g['flux'][idx]
             return wave.astype(float), flux.astype(float)
         except Exception as e:
             logger.warning(f'Failed to load spectra cache for {model_key}: {e}')
             return None
+
+    def _sed_xmin(self):
+        """Lower wavelength limit (um) of the SED plots: 0.25 um, or bluer
+        when fitted bands lie below it (GALEX, HST UV, IUE / TD-1)."""
+        w = np.asarray(self.star.wave)[self.star.filter_mask]
+        if w.size and w.min() < 0.14:
+            return 0.1
+        if w.size and w.min() < 0.25:
+            return 0.125
+        return 0.25
 
     def _get_raw_spectrum(self, model_key, teff, logg, z):
         """Fetch broadened spectrum for given model and stellar params.
@@ -399,6 +440,51 @@ class SEDPlotter:
         finally:
             self.theta[:] = orig_theta
 
+    def _binary_SED(self, ax):
+        """Model spectrum of a binary fit: each component (dashed / dotted)
+        and their sum (solid), extincted and distance-scaled."""
+        Rv = 3.1
+        th = self.theta
+        teff, logg, z, dist, rad, Av, teff2, logg2, rad2 = th[:9]
+        dist_sr = dist * u.pc.to(u.solRad)
+        comps = []
+        for grid, t, g, r in ((self.grid, teff, logg, rad),
+                              (self.grid2, teff2, logg2, rad2)):
+            sp = self._get_raw_spectrum(grid, t, g, z)
+            if sp is None:
+                logger.warning(
+                    f"No spectrum of grid '{grid}' for the SED plot (spectra "
+                    f"cache or ARIADNE_MODELS); drawing the other component "
+                    f"only.")
+                comps.append(None)
+                continue
+            wave, flux = sp
+            flux = apply(self.av_law(wave * 1e4, Av, Rv), flux.copy())
+            comps.append((wave, flux * (r / dist_sr) ** 2))
+        styles = (('--', f'{self.grid}, {teff:.0f} K'),
+                  (':', f'{self.grid2}, {teff2:.0f} K'))
+        for comp, (ls, lab) in zip(comps, styles):
+            if comp is not None:
+                w, f = comp
+                ax.plot(w, f * w, lw=1.0, ls=ls, color=self.model_color,
+                        alpha=0.8, zorder=0, label=lab)
+        if all(c is not None for c in comps):
+            (w1, f1), (w2, f2) = comps
+            ftot = f1 + np.interp(w1, w2, f2, left=np.nan, right=np.nan)
+            ax.plot(w1, ftot * w1, lw=1.25, color=self.model_color, zorder=0,
+                    label='sum')
+            if self.save:
+                np.savetxt(f'{self.out_folder}/SED.dat',
+                           np.vstack((w1, ftot * w1)).T, fmt='%s',
+                           header='wavelength(mu m) wave*flux(erg cm-2 s-2)')
+        ax.legend(loc='upper right', fontsize=self.tick_labelsize * 0.8)
+
+    def _grid_axes(self, grid):
+        """Unique Teff, log g and [Fe/H] node values of ``grid``."""
+        self.star.load_grid(grid)
+        return (np.unique(self.star.teff), np.unique(self.star.logg),
+                np.unique(self.star.z))
+
     def _plot_bma_gray_spectra(self, ax, n_samples=100):
         """Draw gray sampled model spectra weighted by BMA weights."""
         rng = np.random.default_rng()
@@ -411,6 +497,10 @@ class SEDPlotter:
             samples = self.out['originals'][model_name]
             n_avail = len(samples['teff'])
             indices = rng.choice(n_avail, size=n_model, replace=True)
+
+            if getattr(self, 'binary', False):
+                self._binary_gray_draws(ax, model_name, samples, indices, Rv)
+                continue
 
             self.star.load_grid(model_name)
 
@@ -453,6 +543,44 @@ class SEDPlotter:
 
         # Restore winning model's grid
         self.star.load_grid(self.grid)
+
+    def _binary_gray_draws(self, ax, pair, samples, indices, Rv):
+        """Gray posterior-draw spectra of one binary grid pair: both
+        components at their nearest grid nodes, summed per draw."""
+        g1, g2 = split_grid_name(pair)
+        g2 = g2 or g1
+        axes = {g: self._grid_axes(g) for g in dict.fromkeys((g1, g2))}
+        spectra = {}
+
+        def _snap(grid, t, g, z):
+            at, ag, az = axes[grid]
+            key = (grid, at[np.argmin(np.abs(at - t))],
+                   ag[np.argmin(np.abs(ag - g))],
+                   az[np.argmin(np.abs(az - z))])
+            if key not in spectra:
+                spectra[key] = self._get_raw_spectrum(*key)
+            return spectra[key]
+
+        def _val(k, i):
+            v = samples[k]
+            return v[i] if np.ndim(v) else v
+
+        for idx in indices:
+            z = _val('z', idx)
+            s1 = _snap(g1, _val('teff', idx), _val('logg', idx), z)
+            s2 = _snap(g2, _val('teff2', idx), _val('logg2', idx), z)
+            if s1 is None or s2 is None:
+                continue
+            d = _val('dist', idx) * u.pc.to(u.solRad)
+            Av = _val('Av', idx)
+            w1, f1 = s1
+            w2, f2 = s2
+            ftot = (f1 * (_val('rad', idx) / d) ** 2
+                    + np.interp(w1, w2, f2, left=np.nan, right=np.nan)
+                    * (_val('rad2', idx) / d) ** 2)
+            ftot = apply(self.av_law(w1 * 1e4, Av, Rv), ftot)
+            ax.plot(w1, ftot * w1, color='gray', alpha=0.15, lw=0.5,
+                    zorder=-1)
 
     def plot_SED_no_model(self, s=None):
         """Plot raw photometry."""
@@ -557,11 +685,7 @@ class SEDPlotter:
         # ticks, lower bound set by whether GALEX UV bands are present.
         ax.set_xticks(np.linspace(1, 10, 10))
         ax.get_xaxis().set_major_formatter(ticker.ScalarFormatter())
-        fnames = self.star.filter_names[self.star.filter_mask]
-        if 'GALEX_FUV' in fnames or 'GALEX_NUV' in fnames:
-            ax.set_xlim([0.125, 6])
-        else:
-            ax.set_xlim([0.25, 6])
+        ax.set_xlim([self._sed_xmin(), 6])
         ax.set_xlabel(r'$\lambda (\mu m)$',
                       fontsize=self.fontsize,
                       fontname=self.fontname)
@@ -611,7 +735,7 @@ class SEDPlotter:
 
         residuals, errors = get_residuals(
             self.theta, flxs, errs, wave, filters, self.interpolator, self.norm,
-            self.av_law)
+            self.av_law, binary=self.binary)
 
         norm_res = residuals / errors
 
@@ -728,19 +852,9 @@ class SEDPlotter:
         ax_r.yaxis.set_minor_locator(ylocmin)
         ax_r.yaxis.set_minor_formatter(ticker.NullFormatter())
 
-        xlims1 = [0.125, 6]
-        xlims2 = [0.25, 6]
-        if self.irx:
-            xlims1 = [0.125, 250]
-            xlims2 = [0.25, 250]
-
-        if 'GALEX_FUV' in self.star.filter_names[self.star.filter_mask] or \
-                'GALEX_NUV' in self.star.filter_names[self.star.filter_mask]:
-            ax.set_xlim(xlims1)
-            ax_r.set_xlim(xlims1)
-        else:
-            ax.set_xlim(xlims2)
-            ax_r.set_xlim(xlims2)
+        xlims = [self._sed_xmin(), 250 if self.irx else 6]
+        ax.set_xlim(xlims)
+        ax_r.set_xlim(xlims)
 
         labels = [item.get_text() for item in ax.get_xticklabels()]
 
@@ -766,16 +880,32 @@ class SEDPlotter:
 
     def SED(self, ax):
         """Plot the SED model."""
-        # Only these grids ship full spectra (cache / models dir). The newer
-        # grids (bosz, sphinx, tlusty) provide a band-flux interpolator for
-        # fitting but no spectra, so the continuous model line can't be drawn.
-        # Degrade gracefully: plot_SED still shows the photometry and the
-        # synthetic-flux markers; we just skip (and explain) the model curve.
-        # (Also guards the if/elif chain below, which has no else and would
-        # otherwise hit undefined wave/flux in the save branch.)
+        if getattr(self, 'binary', False):
+            self._binary_SED(ax)
+            return
+        # Only these grids ship full spectra. BOSZ and TLUSTY have them only
+        # in a cache extended with tools/extend_spectra_cache.py (the Zenodo
+        # cache lacks them) and SPHINX has none, so for those the continuous
+        # model line can't always be drawn. Degrade gracefully: plot_SED
+        # still shows the photometry and the synthetic-flux markers; we just
+        # skip (and explain) the model curve. (Also guards the if/elif chain
+        # below, which has no else and would otherwise hit undefined
+        # wave/flux in the save branch.)
         _spectra_grids = ('phoenix', 'btsettl', 'btnextgen', 'btcond',
                           'ck04', 'kurucz', 'coelho')
-        if self.grid.lower() not in _spectra_grids:
+        _cache_only_grids = ('bosz', 'tlusty')
+        cached_only = None
+        if self.grid.lower() in _cache_only_grids:
+            cached_only = self._load_from_cache(self.grid.lower())
+            if cached_only is None:
+                logger.warning(
+                    f"Grid '{self.grid}' has no spectra in the spectra cache "
+                    f"(add them with tools/extend_spectra_cache.py); plotting "
+                    f"the SED without the continuous model spectrum "
+                    f"(photometry and synthetic model fluxes are still "
+                    f"shown).")
+                return
+        elif self.grid.lower() not in _spectra_grids:
             logger.warning(
                 f"Grid '{self.grid}' has no spectra in the cache; plotting the "
                 f"SED without the continuous model spectrum (photometry and "
@@ -921,6 +1051,14 @@ class SEDPlotter:
             flux *= wave * norm
             ax.plot(wave, flux, lw=1.25, color=self.model_color, zorder=0)
 
+        elif cached_only is not None:
+            # BOSZ / TLUSTY: spectra from the extended cache only.
+            wave, flux = cached_only
+            ext = self.av_law(wave * 1e4, Av, Rv)
+            flux = apply(ext, flux)
+            flux *= wave * norm
+            ax.plot(wave, flux, lw=1.25, color=self.model_color, zorder=0)
+
         elif self.grid == 'coelho':
             cached = self._load_from_cache('coelho')
             if cached is not None:
@@ -1056,7 +1194,7 @@ class SEDPlotter:
                     # Normal
                     n, bins1, patches = ax1.hist(samp, alpha=.3, bins=20,
                                                  label=label, density=True,
-                                                 color=colors[j])
+                                                 color=colors[j % len(colors)])
                     # Weighted
                     n, bins2, patches = ax2.hist(
                         samp, alpha=.3, bins=20, label=label,
@@ -1076,9 +1214,10 @@ class SEDPlotter:
                     xx1 = np.linspace(bins1[0], bins1[-1], 1000)
                     xx2 = np.linspace(bins2[0], bins2[-1], 1000)
                     # Plot best fit
-                    ax1.plot(xx1, kde(xx2), lw=2, alpha=1, color=colors[j])
+                    ax1.plot(xx1, kde(xx2), lw=2, alpha=1,
+                             color=colors[j % len(colors)])
                     ax2.plot(xx1, kde(xx2) * popt[2], lw=2, alpha=1,
-                             color=colors[j])
+                             color=colors[j % len(colors)])
                 # The same but for the weighted samples
                 n, bins, patches = ax1.hist(
                     self.out['weighted_samples'][param], alpha=.3,
@@ -1115,6 +1254,12 @@ class SEDPlotter:
                     lab = 'Age (Gyr)'
                 elif param == 'Mass':
                     lab = r'Mass (M$_\odot$)'
+                elif param == 'teff2':
+                    lab = r'Teff$_2$ (K)'
+                elif param == 'rad2':
+                    lab = r'R$_2$ (R$_\odot$)'
+                elif param == 'logg2':
+                    lab = r'Log g$_2$'
                 # Normal
                 ax1.set_ylabel('PDF',
                                fontsize=self.fontsize,
@@ -1343,7 +1488,21 @@ class SEDPlotter:
                     yerr=[[lum_lo], [lum_hi]], color=self.hr_color,
                     zorder=1001)
         ax.scatter(teff, lum, s=350, color=self.hr_color, zorder=1002,
-                   edgecolors='k', marker=self.hr_marker)
+                   edgecolors='k', marker=self.hr_marker,
+                   label='primary' if getattr(self, 'binary', False) else None)
+        if getattr(self, 'binary', False):
+            # The isochrones are the primary's; the secondary is only placed.
+            bf = self.out[f'best_fit_{self.method}']
+            un = self.out[f'uncertainties_{self.method}']
+            t2, l2 = np.log10(bf['teff2']), np.log10(bf['lum2'])
+            t2e = np.array(un['teff2']) / (bf['teff2'] * np.log(10))
+            l2e = np.array(un['lum2']) / (bf['lum2'] * np.log(10))
+            ax.errorbar(t2, l2, xerr=[[t2e[0]], [t2e[1]]],
+                        yerr=[[l2e[0]], [l2e[1]]], color='tab:blue',
+                        zorder=1001)
+            ax.scatter(t2, l2, s=350, color='tab:blue', zorder=1002,
+                       edgecolors='k', marker='*', label='secondary')
+            ax.legend(loc='best')
 
         ax.invert_xaxis()
         ax.set_xlabel('logTeff',
@@ -1374,7 +1533,8 @@ class SEDPlotter:
         """Make corner plot."""
         print('Plotting corner.')
         m = self.method if self.method == 'samples' else 'average'
-        samples = self.out[f'weighted_{m}']
+        samples = self.out.get(f'weighted_{m}',
+                               self.out.get('posterior_samples'))
         all_samps = []
         theta_lo = []
         theta_up = []
@@ -1781,7 +1941,13 @@ class SEDPlotter:
                 new_titles[i] = r'Av ='
             if param == 'inflation':
                 new_titles[i] = r'$\sigma$ ='
-            if param == 'rad' or param == 'dist':
+            if param == 'teff2':
+                new_titles[i] = r'Teff$_2$ ='
+            if param == 'logg2':
+                new_titles[i] = r'    Log g$_2$ ='
+            if param == 'rad2':
+                new_titles[i] = r'R$_2$ ='
+            if param in ('rad', 'dist', 'rad2'):
                 new_titles[i] += '{:.3f}'.format(theta[i])
                 new_titles[i] += r'$^{+' + \
                                  '{:.3f}'.format(theta_up[i] - theta[i])
@@ -1816,6 +1982,12 @@ class SEDPlotter:
                 new_labels[i] = r'Av'
             if param == 'inflation':
                 new_labels[i] = r'$\sigma$'
+            if param == 'teff2':
+                new_labels[i] = r'Teff$_2$ (K)'
+            if param == 'logg2':
+                new_labels[i] = r'Log g$_2$'
+            if param == 'rad2':
+                new_labels[i] = r'R$_2$ $($R$_\odot)$'
         return new_labels
 
     def __read_config(self):

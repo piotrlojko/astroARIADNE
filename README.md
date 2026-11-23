@@ -132,6 +132,25 @@ python -c "from astroARIADNE.fetch import fetch_spectra_cache; fetch_spectra_cac
 
 No environment variables or additional setup required.
 
+#### BOSZ and TLUSTY spectra
+
+The Zenodo cache has no BOSZ or TLUSTY spectra, so fits with those grids are
+plotted without the continuous model spectrum. `tools/extend_spectra_cache.py`
+adds them as two more cache groups, `bosz` and `tlusty`: it downloads the raw
+spectra of every node of the bundled BOSZ and TLUSTY grids (BOSZ 2024 from
+MAST, ~1.1 GB; TLUSTY OSTAR2002+BSTAR2006 from the SVO Theory Server,
+~0.7 GB), checks that they reproduce the bundled grids, and writes them on the
+cache's wavelength grid, extended down to 0.10 um so the far-UV is covered:
+
+```bash
+python tools/extend_spectra_cache.py download   # into ~/ARIADNE_models
+python tools/extend_spectra_cache.py verify
+python tools/extend_spectra_cache.py cache      # backs the cache up first
+```
+
+`fetch_spectra_cache(force=True)` replaces the cache with the Zenodo one, so
+rerun the `cache` step after it (the downloads are kept).
+
 ### Full Model Grids (Optional)
 
 If you need the raw high-resolution model spectra (e.g. for custom broadening
@@ -376,6 +395,9 @@ s = Star(starname, ra, dec, g_id=gaia_id,
                     'IUE_IUE.1450-1500': (2.1e-13, 1e-14, 'erg / (s cm2 AA)')})
 ```
 
+The IUE and TD-1 ultraviolet bands can only be fitted with the BOSZ and TLUSTY
+grids (see [filters.md](filters.md#ultraviolet-iue-and-td-1)).
+
 If for whatever reason **ARIADNE** found a bad photometry point, and you needed
 to remove it, you can invoke the `remove_mag` method. For example, you wanted
 to remove the TESS magnitude due to it being from a blended source, you can just
@@ -534,6 +556,11 @@ temperature-gated to its validity range). `sphinx` and `tlusty` are meant to be
 run **standalone** (see below); `tlusty` uses a wide uniform Teff prior because
 the FGK population prior cannot reach the hot-star regime.
 
+`bosz` and `tlusty` are the only grids with the IUE and TD-1 ultraviolet bands
+(see [filters.md](filters.md#ultraviolet-iue-and-td-1)). A BMA fit of a star
+with photometry in one of them leaves out every grid without it, with a
+warning, and a standalone fit with such a grid stops with an error.
+
 ### Running a single model (standalone)
 
 To fit a single grid instead of doing BMA, set `f.bma = False` and pick the
@@ -558,6 +585,84 @@ f.fit()                 # single-grid fit (not fit_bma)
 This is the right mode for the standalone grids: `sphinx` (M dwarfs),
 `tlusty` (hot stars), and `coelho` (optical-only). The output goes to the same
 files as a BMA run minus the model-averaging products.
+
+### Binary stars (two-component fits)
+
+An unresolved binary, or a star with a hot or cool companion, is fitted as the
+sum of two stars by setting `f.binary = True`. The two components share the
+distance, the extinction and [Fe/H]; each has its own Teff, log g and radius
+(`teff2`, `logg2` and `rad2` for the secondary):
+
+```
+F_model = [F_1(teff, logg, z) (rad/dist)^2 + F_2(teff2, logg2, z) (rad2/dist)^2] x 10^(-0.4 A(Av))
+```
+
+Each component can be modelled with its own grid, which is what a pair of very
+different stars needs. A late B star with a hot subdwarf or BLAP companion, for
+example, takes BOSZ for the primary and TLUSTY for the secondary:
+
+```python
+f = Fitter()
+f.star = s
+f.setup = ['dynesty', 500, 0.5, 'multi', 'rwalk', 8, False]
+f.binary = True
+f.bma = True
+f.models = ['bosz']           # primary grids
+f.models2 = ['tlusty']        # secondary grids (default: each grid with itself)
+f.prior_setup = {
+    'teff': ('normal', 11500, 1000), 'logg': ('default'), 'z': ('default'),
+    'dist': ('default'), 'rad': ('default'), 'Av': ('normal', 0.38, 0.02),
+    'teff2': ('uniform', 20000, 40000), 'logg2': ('uniform', 4.0, 4.75),
+    'rad2': ('uniform', 0.01, 1.0),
+}
+f.initialize()
+f.fit_bma()
+```
+
+- **Grids.** In BMA every primary x secondary grid pair is fitted and averaged
+  (named e.g. `bosz+tlusty`); without `models2` each grid is paired with itself.
+  A pair lacking a fitted band is left out with a warning, and the temperature
+  gating applies to the primary only. For a single-grid fit use `f.grid` and
+  `f.grid2` (default: the primary's grid) with `f.fit()`.
+- **Priors.** `teff2`, `logg2` and `rad2` take the same prior types as any
+  other parameter. Missing ones default to the primary's default Teff and
+  radius priors (TLUSTY's 15000-55000 K for a TLUSTY secondary) and a uniform
+  log g of 3.5-6. Give the components distinguishable priors (or grids); the
+  model is otherwise symmetric under swapping them. A warning is given when
+  much of the `teff2` prior lies outside the secondary grid.
+- **Flux ratios.** A measured contrast `m2 - m1` (speckle or AO imaging, a
+  spectroscopic light ratio) can be added in any band both grids model:
+  `f.add_contrast('GaiaDR2v2_G', 2.1, 0.1)`. Two contrasts in bands of
+  different colour constrain both stars tightly even without ultraviolet data.
+- **Requirements.** The distance/radius parametrisation (`f.norm = False`)
+  and the `dynesty` engine.
+
+Outputs gain the secondary's parameters (`teff2`, `logg2`, `rad2`) and derived
+`grav_mass2`, `lum2` and `AD2` in `best_fit*.dat`, its spectral type, and
+`binary_light_fractions.dat`: the secondary's fraction of the observed flux in
+every fitted band (posterior median and 16th-84th percentiles), with the
+observed magnitude split into the two components. The posterior samples hold
+the light fraction of each band as `frac2_<band>`. The MIST age and mass are the
+primary's, fitted to the photometry with the secondary's light removed. The
+SED plot shows both components and their sum, drawn from the highest-likelihood
+posterior sample (the per-parameter best values of a binary need not form a
+good model, because Teff2 and R2 are correlated), and the HR diagram marks the
+secondary next to the primary.
+
+**Is the companion needed?** Compare the evidence of a binary fit with that of
+a single-star fit of the same photometry (`log Bayesian evidence`, or `lnZ` in
+the output pickles): a difference of a few in ln Z is significant. Two caveats
+matter when only a few bands carry the companion's light, such as two
+ultraviolet points:
+
+- The per-band excess-noise terms can absorb a mismatch, so a single star can
+  "explain" an ultraviolet excess by inflating the noise of those bands instead
+  of needing a second star. Fix those terms when the uncertainties are
+  trusted: `'IUE.1250-1300_noise': ('fixed', 0)` in `prior_setup` (the names
+  are listed in `prior.dat` and in the fit summary).
+- With one or two bands the secondary's Teff and radius are degenerate (a
+  hotter, smaller star gives the same flux); its light fractions remain well
+  defined.
 
 **Grid wavelength coverage.** Some grids do not span the full set of filters
 **ARIADNE** supports. The Coelho 2014 grid, in particular, only covers the
