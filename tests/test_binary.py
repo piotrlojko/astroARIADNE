@@ -307,6 +307,21 @@ def test_end_to_end_binary_fit_and_plots(tmp_path, grids):
     i = int(np.argmax(ps['loglike']))
     assert p.theta[6] == ps['teff2'][i]          # max-likelihood sample
     p.plot_SED()
+    # The SED axis is lambda F_lambda, so error bars are lambda * sigma_F:
+    # never shorter than the measurement error, and exactly it for the UV
+    # bands whose excess noise is fixed at zero.
+    import matplotlib.pyplot as plt
+    from matplotlib.container import ErrorbarContainer
+    bars = [c for c in plt.gcf().axes[0].containers
+            if isinstance(c, ErrorbarContainer)]
+    assert len(bars) == len(p.wave)
+    for c, w, fe in zip(bars, p.wave, p.flux_er):
+        (_, y0), (_, y1) = c.lines[2][-1].get_segments()[0]
+        half = (y1 - y0) / 2
+        assert half >= fe * w * (1 - 1e-9)
+        if w < 0.2:
+            assert half == pytest.approx(fe * w, rel=1e-9)
+    plt.close('all')
     p.plot_corner()
     assert (tmp_path / 'plots' / 'SED.png').exists()
     assert (tmp_path / 'plots' / 'CORNER.png').exists()

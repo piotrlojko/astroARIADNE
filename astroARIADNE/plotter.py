@@ -923,12 +923,14 @@ class SEDPlotter:
                              rf'$T_{{\rm eff}}$ = {self.theta[0]:.0f} K')
 
         # Model plot: observed fluxes as circles coloured by band (see the
-        # filter legend), synthetic model fluxes as open diamonds.
+        # filter legend), synthetic model fluxes as open diamonds. The axis is
+        # lambda F_lambda, so the F_lambda errors (measurement and fitted
+        # noise in quadrature) are scaled by lambda too.
         colors = self._filter_colors(self.wave)
         for w, fl, bp, er, c in zip(self.wave, self.flux, self.bandpass,
                                     errors, colors):
-            ax.errorbar(w, fl * w, xerr=bp, yerr=er, fmt='none', ecolor=c,
-                        elinewidth=1.5, zorder=1)
+            ax.errorbar(w, fl * w, xerr=bp, yerr=er * w, fmt='none',
+                        ecolor=c, elinewidth=1.5, zorder=1)
         ax.scatter(self.wave, self.flux * self.wave,
                    edgecolors='black', linewidths=0.6, marker=self.marker,
                    c=colors, s=self.scatter_size, zorder=2,
@@ -941,7 +943,8 @@ class SEDPlotter:
 
         if self.irx:
             ax.errorbar(self.irx_wave, self.irx_flux * self.irx_wave,
-                        xerr=self.irx_bandpass, yerr=self.irx_flux_er,
+                        xerr=self.irx_bandpass,
+                        yerr=self.irx_flux_er * self.irx_wave,
                         fmt=',', ecolor=self.irx_error_color, zorder=0,
                         marker=None)
             ax.scatter(self.irx_wave, self.irx_flux * self.irx_wave,

@@ -69,6 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The SED plots printed stray minor tick labels (e.g. 2x10^-1) over the
   bottom of the model panel and beside the wavelength axis.
 - The corner plot was saved once per parameter instead of once.
+- The model SED plot drew the F_lambda errors on the lambda F_lambda axis
+  without the factor lambda, so error bars were too long blueward of 1 um
+  (about 7x at 0.13 um, often reaching the bottom of the plot for UV bands
+  with fitted excess noise) and too short redward of it. The residual panel
+  and the fit itself were not affected.
 - The README's isochrones setup command (`get_bc_grid` does not exist, and
   `nosetests` is gone) now downloads the MIST grids with `get_ichrone`.
 - `import astroARIADNE` no longer exits when libmultinest (or a library it
