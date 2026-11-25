@@ -63,6 +63,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   older output pickles are read with the new names (so they plot and BMA can
   reuse them). In `astroARIADNE.utils`, `get_noise_name` is deprecated in
   favour of `get_band_tag` / `excess_scatter_name`.
+- **Excess-scatter entries in `prior_setup` are checked.** One for a band
+  that is not being fitted is skipped with a warning (it used to raise a
+  `KeyError` when set to `'default'`), and a prior other than `'default'` or
+  `('fixed', value)` warns that the default is used (it used to be replaced
+  silently).
 - **Binary SED plots colour the components**: the primary's spectrum in
   `#112b42` (dashed), the secondary's in `#592615` (dotted), the sum in
   black. Set with `model_color_primary`, `model_color_secondary` and

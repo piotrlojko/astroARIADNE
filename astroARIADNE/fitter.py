@@ -197,6 +197,34 @@ def _upgrade_prior_setup(prior_setup):
     return out
 
 
+def _check_excess_scatter_setup(prior_setup, scatter):
+    """Keys of ``prior_setup`` to use, after checking the excess-scatter ones.
+
+    ``scatter`` lists the excess-scatter terms of the fitted bands. A term of
+    a band that is not fitted (e.g. one a catalogue no longer returns) is
+    skipped with a warning. Only ``'default'`` and ``('fixed', value)`` apply
+    to these terms; any other prior is replaced by the default, with a
+    warning.
+    """
+    keys = []
+    for k, v in prior_setup.items():
+        if is_excess_scatter(k):
+            if k not in scatter:
+                warnings.warn(
+                    f'prior_setup: {k!r} is not the excess-scatter term of a '
+                    f'fitted band; ignoring it. Fitted bands: '
+                    f'{", ".join(scatter)}.', UserWarning, stacklevel=3)
+                continue
+            if v != 'default' and (isinstance(v, str) or v[0] != 'fixed'):
+                warnings.warn(
+                    f'prior_setup: excess-scatter terms take only "default" '
+                    f'or ("fixed", value); using the default prior for '
+                    f'{k!r} instead of {v!r}.', UserWarning, stacklevel=3)
+                continue
+        keys.append(k)
+    return keys
+
+
 def _prior_signature(prior):
     """A comparable description of one prior: frozen scipy distributions by
     name and parameters, spline priors by their coefficients."""
@@ -1147,13 +1175,10 @@ class Fitter:
         """Create priors from the manual setup."""
         prior_dict = dict()
         self.prior_setup = _upgrade_prior_setup(self.prior_setup)
-        keys = self.prior_setup.keys()
-        scatter = []
         mask = self.star.filter_mask
-        flxs = self.star.flux[mask]
-        errs = self.star.flux_er[mask]
-        for filt, flx, flx_e in zip(self.star.filter_names[mask], flxs, errs):
-            scatter.append(excess_scatter_name(filt))
+        scatter = [excess_scatter_name(filt)
+                   for filt in self.star.filter_names[mask]]
+        keys = _check_excess_scatter_setup(self.prior_setup, scatter)
         prior_out = 'Parameter\tPrior\tValues\n'
         if 'norm' in keys and ('rad' in keys or 'dist' in keys):
             er = PriorError('rad or dist', 1)

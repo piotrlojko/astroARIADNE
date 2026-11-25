@@ -727,8 +727,12 @@ with a scale of ten times the band's uncertainty.
 band's reported error, for scatter the error bars do not capture (variability,
 calibration offsets between catalogues, underestimated errors). They are fitted
 by default; set one to `('fixed', 0)` in `prior_setup` to trust that band's
-error as it is. Their posteriors are reported in magnitudes, under "Excess
-scatter (mag)" in the fit summary. Up to version 1.6.0 they were named
+error as it is. Only `'default'` and `('fixed', value)` apply to these terms
+(any other prior falls back to the default, with a warning); a fixed value is
+a flux in erg s<sup>-1</sup> cm<sup>-2</sup> um<sup>-1</sup>, like the band's
+error. A term for a band that is not being fitted is ignored with a warning.
+Their posteriors are reported in magnitudes, under "Excess scatter (mag)" in
+the fit summary. Up to version 1.6.0 they were named
 `<band>_noise`; `prior_setup` still accepts those keys (with a
 `FutureWarning`), and older output pickles are read with the new names.
 

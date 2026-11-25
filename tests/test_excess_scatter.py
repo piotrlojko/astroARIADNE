@@ -96,3 +96,22 @@ def test_new_name_wins_over_old_for_the_same_band(tmp_path):
     i = list(fitter_mod.order).index('G_excess_scatter')
     assert f.coordinator[i] == 0
     assert np.isfinite(f.priors['G_excess_scatter'].ppf(0.5))
+
+
+def test_term_of_a_band_not_fitted_is_skipped_with_a_warning(tmp_path):
+    # e.g. a catalogue no longer returns that band
+    f = _fitter(tmp_path, dict(PRIORS, W2_excess_scatter='default',
+                               G_excess_scatter='default'))
+    with pytest.warns(UserWarning, match="'W2_excess_scatter' is not"):
+        f.initialize()
+    assert 'W2_excess_scatter' not in f.priors
+    assert 'G_excess_scatter' in f.priors
+
+
+def test_unsupported_prior_type_falls_back_to_the_default(tmp_path):
+    f = _fitter(tmp_path, dict(PRIORS, G_excess_scatter=('normal', 0, 1)))
+    with pytest.warns(UserWarning, match='take only "default"'):
+        f.initialize()
+    i = list(fitter_mod.order).index('G_excess_scatter')
+    assert f.coordinator[i] == 0
+    assert f.priors['G_excess_scatter'].dist.name == 'truncnorm'
