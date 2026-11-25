@@ -157,7 +157,9 @@ class SEDPlotter:
 
         # Read output files.
         if input_files != 'raw':
-            out = pickle.load(open(input_files, 'rb'))
+            with open(input_files, 'rb') as fh:
+                # older outputs name the excess-scatter terms <band>_noise
+                out = upgrade_legacy_names(pickle.load(fh))
             self.out = out
             self.engine = out['engine']
             self.star = out['star']
@@ -217,8 +219,7 @@ class SEDPlotter:
                 irx_filt = self.star.filter_names[irx_mask]
                 irx_wave = self.star.wave[irx_mask]
             for filt, flx, flx_e in zip(filters, flxs, errs):
-                p_ = get_noise_name(filt) + '_noise'
-                self.order = np.append(self.order, p_)
+                self.order = np.append(self.order, excess_scatter_name(filt))
 
             self.interpolator = load_band_grid(self.grid)
             if self.binary:
@@ -452,6 +453,8 @@ class SEDPlotter:
 
         In a binary fit the primary's parameters carry the subscript 1.
         """
+        if is_excess_scatter(param):
+            return excess_scatter_label(param)
         b = getattr(self, 'binary', False)
         sym = {
             'teff': r'T_{\rm eff,1}' if b else r'T_{\rm eff}',
@@ -621,8 +624,9 @@ class SEDPlotter:
             self.theta[:] = orig_theta
 
     def _binary_SED(self, ax):
-        """Model spectrum of a binary fit: each component (dashed / dotted)
-        and their sum (solid), extincted and distance-scaled."""
+        """Model spectrum of a binary fit: each component (dashed / dotted,
+        in ``model_color_primary`` / ``model_color_secondary``) and their sum
+        (solid, ``model_color``), extincted and distance-scaled."""
         Rv = 3.1
         th = self.theta
         teff, logg, z, dist, rad, Av, teff2, logg2, rad2 = th[:9]
@@ -641,15 +645,17 @@ class SEDPlotter:
             wave, flux = sp
             flux = apply(self.av_law(wave * 1e4, Av, Rv), flux.copy())
             comps.append((wave, flux * (r / dist_sr) ** 2))
-        styles = (('--', f'Primary: {_grid_label(self.grid)}, '
-                         rf'$T_{{\rm eff}}$ = {teff:.0f} K'),
-                  (':', f'Secondary: {_grid_label(self.grid2)}, '
-                        rf'$T_{{\rm eff}}$ = {teff2:.0f} K'))
-        for comp, (ls, lab) in zip(comps, styles):
+        styles = (('--', self.model_color_primary,
+                   f'Primary: {_grid_label(self.grid)}, '
+                   rf'$T_{{\rm eff}}$ = {teff:.0f} K'),
+                  (':', self.model_color_secondary,
+                   f'Secondary: {_grid_label(self.grid2)}, '
+                   rf'$T_{{\rm eff}}$ = {teff2:.0f} K'))
+        for comp, (ls, col, lab) in zip(comps, styles):
             if comp is not None:
                 w, f = comp
-                ax.plot(w, f * w, lw=1.0, ls=ls, color=self.model_color,
-                        alpha=0.8, zorder=0, label=lab)
+                ax.plot(w, f * w, lw=1.2, ls=ls, color=col, zorder=0,
+                        label=lab)
         if all(c is not None for c in comps):
             (w1, f1), (w2, f2) = comps
             ftot = f1 + np.interp(w1, w2, f2, left=np.nan, right=np.nan)
@@ -924,8 +930,8 @@ class SEDPlotter:
 
         # Model plot: observed fluxes as circles coloured by band (see the
         # filter legend), synthetic model fluxes as open diamonds. The axis is
-        # lambda F_lambda, so the F_lambda errors (measurement and fitted
-        # noise in quadrature) are scaled by lambda too.
+        # lambda F_lambda, so the F_lambda errors (measurement error and
+        # fitted excess scatter in quadrature) are scaled by lambda too.
         colors = self._filter_colors(self.wave)
         for w, fl, bp, er, c in zip(self.wave, self.flux, self.bandpass,
                                     errors, colors):
@@ -1351,7 +1357,7 @@ class SEDPlotter:
         ]
         models = [key for key in self.out['originals'].keys()]
         for i, param in enumerate(self.order):
-            if 'noise' in param:
+            if is_excess_scatter(param):
                 continue
             if not self.coordinator[i]:
                 f1, ax1 = plt.subplots(figsize=(12, 6))
@@ -1683,7 +1689,7 @@ class SEDPlotter:
         theta_up = []
 
         for i, o in enumerate(self.order):
-            if 'noise' in o:
+            if is_excess_scatter(o):
                 self.coordinator[i] = 1
 
         theta = getattr(self, 'theta_best', self.theta)
@@ -1692,7 +1698,7 @@ class SEDPlotter:
 
         for i, param in enumerate(self.order):
             if not self.coordinator[i]:
-                if 'noise' in param:
+                if is_excess_scatter(param):
                     continue
                 _, lo, up = credibility_interval(samples[param])
                 theta_lo.append(lo)
@@ -2060,6 +2066,8 @@ class SEDPlotter:
         self.legend_fontsize = 16
         self.filter_cmap = 'turbo'
         self.corner_title_fontsize = 18
+        self.model_color_primary = '#112b42'
+        self.model_color_secondary = '#592615'
         if self.settings_dir is None:
             settings = open(filesdir + '/plot_settings.dat', 'r')
         else:

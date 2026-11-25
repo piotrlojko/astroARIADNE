@@ -655,11 +655,12 @@ the output pickles): a difference of a few in ln Z is significant. Two caveats
 matter when only a few bands carry the companion's light, such as two
 ultraviolet points:
 
-- The per-band excess-noise terms can absorb a mismatch, so a single star can
-  "explain" an ultraviolet excess by inflating the noise of those bands instead
-  of needing a second star. Fix those terms when the uncertainties are
-  trusted: `'IUE.1250-1300_noise': ('fixed', 0)` in `prior_setup` (the names
-  are listed in `prior.dat` and in the fit summary).
+- The per-band excess-scatter terms can absorb a mismatch, so a single star
+  can "explain" an ultraviolet excess by inflating the uncertainty of those
+  bands instead of needing a second star. Fix those terms when the
+  uncertainties are trusted: `'IUE.1250-1300_excess_scatter': ('fixed', 0)` in
+  `prior_setup` (the names are listed in `prior.dat` and in the fit
+  summary).
 - With one or two bands the secondary's Teff and radius are degenerate (a
   hotter, smaller star gives the same flux); its light fractions remain well
   defined.
@@ -717,8 +718,19 @@ distance estimate from Gaia EDR3, and the radius has a flat prior ranging from
 0.5 to 20 R$_\odot$. The default prior for the metallicity `z` and log g are
 also their respective distributions from the RAVE survey, the default prior for
 Av is a flat prior that ranges from 0 to the maximum of line-of-sight as per the
-SFD map, finally the excess noise parameters all have gaussian priors centered
-around their respective uncertainties.
+SFD map, finally the per-band excess-scatter terms have half-normal priors
+with a scale of ten times the band's uncertainty.
+
+**Excess scatter.** Every fitted band has an excess-scatter parameter,
+`<band>_excess_scatter` (for example `G_excess_scatter`, `W1_excess_scatter`,
+`IUE.1250-1300_excess_scatter`): an extra uncertainty added in quadrature to the
+band's reported error, for scatter the error bars do not capture (variability,
+calibration offsets between catalogues, underestimated errors). They are fitted
+by default; set one to `('fixed', 0)` in `prior_setup` to trust that band's
+error as it is. Their posteriors are reported in magnitudes, under "Excess
+scatter (mag)" in the fit summary. Up to version 1.6.0 they were named
+`<band>_noise`; `prior_setup` still accepts those keys (with a
+`FutureWarning`), and older output pickles are read with the new names.
 
 We offer customization on the priors as well, those are listed in the following
 table.
@@ -867,8 +879,11 @@ Plots use STIXGeneral text and STIX math (matching LaTeX/Times documents). Fonts
 sizes and colours come from `Datafiles/plot_settings.dat`; to change them pass
 your own copy with `SEDPlotter(..., settings='my_settings.dat')`. The main keys
 are `fontname`, `mathtext_fontset`, `fontsize` (axis labels), `tick_labelsize`,
-`legend_fontsize`, `filter_cmap` (any matplotlib colormap), and
-`corner_fontsize` / `corner_title_fontsize` / `corner_tick_fontsize`. Settings
+`legend_fontsize`, `filter_cmap` (any matplotlib colormap), `model_color`
+(the model spectrum; for binaries the summed one), `model_color_primary` and
+`model_color_secondary` (a binary's components, by default `#112b42` and
+`#592615`), and `corner_fontsize` / `corner_title_fontsize` /
+`corner_tick_fontsize`. Settings
 apply only while SEDPlotter draws, so your own matplotlib settings are left
 alone.
 

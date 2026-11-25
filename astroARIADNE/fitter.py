@@ -169,6 +169,34 @@ def _prior_flag_message(f):
             f"may be biased. Widen the prior via prior_setup.")
 
 
+def _upgrade_prior_setup(prior_setup):
+    """Accept the pre-rename ``<band>_noise`` keys of ``prior_setup``.
+
+    The per-band excess-scatter terms used to be called ``<band>_noise``.
+    Such keys are read as ``<band>_excess_scatter`` with a ``FutureWarning``;
+    if both spellings are given for a band, the new one wins.
+    """
+    legacy = [k for k in (prior_setup or {})
+              if isinstance(k, str) and k.endswith('_noise')]
+    if not legacy:
+        return prior_setup
+    renamed = {k: k[:-len('_noise')] + EXCESS_SCATTER_SUFFIX for k in legacy}
+    warnings.warn(
+        'prior_setup keys ending in "_noise" are deprecated: the per-band '
+        'terms are now named "<band>_excess_scatter" (e.g. '
+        f'{legacy[0]!r} -> {renamed[legacy[0]]!r}). Reading '
+        f'{", ".join(map(repr, legacy))} as such.', FutureWarning,
+        stacklevel=3)
+    out = {}
+    for k, v in prior_setup.items():
+        if k in renamed:
+            if renamed[k] in prior_setup:
+                continue
+            k = renamed[k]
+        out[k] = v
+    return out
+
+
 def _prior_signature(prior):
     """A comparable description of one prior: frozen scipy distributions by
     name and parameters, spline priors by their coefficients."""
@@ -537,7 +565,7 @@ class Fitter:
             return 'no previous output'
         try:
             with open(path, 'rb') as fh:
-                prev = pickle.load(fh)
+                prev = upgrade_legacy_names(pickle.load(fh))
             prev_star = prev['star']
             prev_filts = list(prev_star.filter_names[prev_star.filter_mask])
             prev_norm = prev['norm']
@@ -789,9 +817,10 @@ class Fitter:
 
         # Parameter coordination.
         # Order for the parameters are:
-        # teff, logg, z, dist, rad, Av, [teff2, logg2, rad2,] noise
+        # teff, logg, z, dist, rad, Av, [teff2, logg2, rad2,] excess scatter
         # or
-        # teff, logg, z, norm, Av, noise
+        # teff, logg, z, norm, Av, excess scatter
+        # (one excess-scatter term per fitted band)
         npars = n_physical(self.norm, binary)
         npars += self.star.used_filters.sum()
         npars = int(npars)
@@ -1099,12 +1128,13 @@ class Fitter:
             self.prior_sources['logg2'] = 'uniform_default'
             defaults['rad2'] = defaults['rad']
             self.prior_sources['rad2'] = 'uniform_default'
-        # Noise model prior setup.
+        # Per-band excess scatter: an extra uncertainty (flux units) added in
+        # quadrature to each band's error. Half-normal prior, scale 10 errors.
         mask = self.star.filter_mask
         flxs = self.star.flux[mask]
         errs = self.star.flux_er[mask]
         for filt, flx, flx_e in zip(self.star.filter_names[mask], flxs, errs):
-            p_ = get_noise_name(filt) + '_noise'
+            p_ = excess_scatter_name(filt)
             mu = 0
             sigma = flx_e * 10
             b = (1 - flx) / flx_e
@@ -1116,14 +1146,14 @@ class Fitter:
     def create_priors_from_setup(self):
         """Create priors from the manual setup."""
         prior_dict = dict()
+        self.prior_setup = _upgrade_prior_setup(self.prior_setup)
         keys = self.prior_setup.keys()
-        noise = []
+        scatter = []
         mask = self.star.filter_mask
         flxs = self.star.flux[mask]
         errs = self.star.flux_er[mask]
         for filt, flx, flx_e in zip(self.star.filter_names[mask], flxs, errs):
-            p_ = get_noise_name(filt) + '_noise'
-            noise.append(p_)
+            scatter.append(excess_scatter_name(filt))
         prior_out = 'Parameter\tPrior\tValues\n'
         if 'norm' in keys and ('rad' in keys or 'dist' in keys):
             er = PriorError('rad or dist', 1)
@@ -1182,7 +1212,7 @@ class Fitter:
                     prior_out += k + '\tuniform\t{}\t{}\n'.format(low, up)
                     if hasattr(self, 'prior_sources'):
                         self.prior_sources[k] = 'user_uniform'
-        for par in noise:
+        for par in scatter:
             prior_dict[par] = self.default_priors[par]
         # A binary's secondary parameters missing from prior_setup take their
         # defaults (see _default_priors).
@@ -1218,10 +1248,10 @@ class Fitter:
         _T = '\t\t\t'
         c = np.random.choice(colors)
 
-        # Physical parameters to display (skip noise priors)
+        # Physical parameters to display (skip the excess-scatter priors)
         physical_params = []
         for param_name in self.priors.keys():
-            if param_name.endswith('_noise'):
+            if is_excess_scatter(param_name):
                 continue
             physical_params.append(param_name)
 
@@ -1629,7 +1659,7 @@ class Fitter:
         for i, param in enumerate(order):
             if not self.coordinator[i]:
                 samples = posterior_samples[:, j]
-                if 'noise' in param:
+                if is_excess_scatter(param):
                     filt = self.star.filter_names[mask][k]
                     flx = self.star.flux[mask][k]
                     _, samples = flux_to_mag(flx, samples, filt)
@@ -1717,7 +1747,7 @@ class Fitter:
 
             for i, param in enumerate(order):
                 if not self.coordinator[i]:
-                    if 'noise' in param:
+                    if is_excess_scatter(param):
                         continue
                     samp = out['posterior_samples'][param]
 
@@ -1764,7 +1794,7 @@ class Fitter:
 
             for i, param in enumerate(order):
                 if not self.coordinator[i]:
-                    if 'noise' not in param:
+                    if not is_excess_scatter(param):
                         continue
                     samp = out['posterior_samples'][param]
                     logdat = out_filler(samp, logdat, param,
@@ -2171,7 +2201,7 @@ class Fitter:
         out['confidence_interval_averaged'] = dict()
         for i, param in enumerate(order):
             if not self.coordinator[i]:
-                if 'noise' in param:
+                if is_excess_scatter(param):
                     continue
                 samp = out['weighted_samples'][param]
                 sampw = out['weighted_average'][param]
@@ -2324,7 +2354,7 @@ class Fitter:
 
         for i, param in enumerate(order):
             if not self.coordinator[i]:
-                if 'noise' not in param:
+                if not is_excess_scatter(param):
                     continue
                 samp = out['weighted_samples'][param]
                 sampw = out['weighted_average'][param]
@@ -2397,7 +2427,7 @@ class Fitter:
         # Read and extract model posterior information.
         for o in outputs:
             with open(o, 'rb') as f:
-                model_posteriors.append(pickle.load(f))
+                model_posteriors.append(upgrade_legacy_names(pickle.load(f)))
         # Extract the evidences of each model.
         for o in model_posteriors:
             evidences.append(o['global_lnZ'])
@@ -2541,7 +2571,7 @@ class Fitter:
         params = dict()  # params for isochrones.
         for i, k in enumerate(order):
             # The secondary of a binary (teff2, ...) is not fitted to MIST.
-            if k == 'logg' or 'noise' in k or k in BINARY_PARAMS:
+            if k == 'logg' or is_excess_scatter(k) or k in BINARY_PARAMS:
                 continue
             if k == 'teff':
                 par = 'Teff'

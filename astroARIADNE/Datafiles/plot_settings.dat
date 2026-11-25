@@ -20,6 +20,8 @@ marker_colors_model mediumslateblue
 marker_colors_model_irx orangered
 scatter_alpha 0.85
 model_color black
+model_color_primary #112b42
+model_color_secondary #592615
 
 ### SED ERRORBARS
 error_color tab:blue

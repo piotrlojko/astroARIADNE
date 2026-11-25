@@ -45,12 +45,26 @@ def test_default_fonts_are_stix(tmp_path):
 def test_settings_file_without_new_keys_still_works(tmp_path):
     old = [l for l in open(filesdir + '/plot_settings.dat')
            if not l.startswith(('mathtext_fontset', 'legend_fontsize',
-                                'filter_cmap', 'corner_title_fontsize'))]
+                                'filter_cmap', 'corner_title_fontsize',
+                                'model_color_'))]
     cfg = tmp_path / 'old_settings.dat'
     cfg.write_text(''.join(old))
     p = _plotter(tmp_path, settings=str(cfg))
     assert (p.mathtext_fontset, p.legend_fontsize, p.filter_cmap,
             p.corner_title_fontsize) == ('stix', 16, 'turbo', 18)
+    assert (p.model_color, p.model_color_primary,
+            p.model_color_secondary) == ('black', '#112b42', '#592615')
+
+
+def test_binary_component_colours_come_from_the_settings(tmp_path):
+    p = _plotter(tmp_path)
+    assert (p.model_color, p.model_color_primary,
+            p.model_color_secondary) == ('black', '#112b42', '#592615')
+    cfg = tmp_path / 'mine.dat'
+    cfg.write_text(open(filesdir + '/plot_settings.dat').read().replace(
+        'model_color_primary #112b42', 'model_color_primary tab:blue'))
+    assert _plotter(tmp_path, settings=str(cfg)).model_color_primary == \
+        'tab:blue'
 
 
 def test_photometry_plot_has_filter_legend_and_stix_text(tmp_path):

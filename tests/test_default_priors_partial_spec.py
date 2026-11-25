@@ -89,7 +89,8 @@ def _build_fitter(star):
     f.coordinator = np.zeros(npars)
     f.fixed = np.zeros(npars)
 
-    # ``_default_priors`` appends noise params to the module-level ``order``
+    # ``_default_priors`` appends the excess-scatter params to the
+    # module-level ``order``
     # (normally initialised inside ``Fitter.initialize``).
     fitter_mod.order = np.array(['teff', 'logg', 'z', 'dist', 'rad', 'Av'])
     return f

@@ -54,6 +54,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bluest to reddest. In `SED.png` a second legend names the model curves and
   explains the markers (observed circles, synthetic-photometry diamonds). The
   wavelength axis is labelled 0.1, 0.2, 0.3, 0.5, 1, 2, ... um.
+- **The per-band "noise" terms are now called excess scatter.** The
+  parameters are `<band>_excess_scatter` (e.g. `W1_excess_scatter`,
+  `IUE.1250-1300_excess_scatter`) instead of `<band>_noise`, in
+  `prior_setup`, the posterior samples, `best_fit*.dat`, `prior.dat` and the
+  plots, and the fit summary heads them "Excess scatter (mag)". Old
+  `<band>_noise` keys in `prior_setup` still work with a `FutureWarning`, and
+  older output pickles are read with the new names (so they plot and BMA can
+  reuse them). In `astroARIADNE.utils`, `get_noise_name` is deprecated in
+  favour of `get_band_tag` / `excess_scatter_name`.
+- **Binary SED plots colour the components**: the primary's spectrum in
+  `#112b42` (dashed), the secondary's in `#592615` (dotted), the sum in
+  black. Set with `model_color_primary`, `model_color_secondary` and
+  `model_color` in `plot_settings.dat`.
 - **A BMA fit leaves out grids that lack a fitted band**, with a warning, and
   a standalone fit with such a grid stops with an error naming the grids that
   have the band. Before, fitting a band a grid had no column for (the IUE and

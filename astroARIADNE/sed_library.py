@@ -5,7 +5,7 @@ import numpy as np
 from extinction import apply
 from scipy.special import ndtr, ndtri
 
-from .utils import get_noise_name
+from .utils import excess_scatter_name
 
 # The parameter order and the extinction curve are constant for a given fit
 # (they depend only on the filter set, the use_norm flag and the extinction
@@ -221,13 +221,14 @@ def _param_order(filts, use_norm, binary=False):
         base = ['teff', 'logg', 'z', 'dist', 'rad', 'Av']
     if binary:
         base = base + list(BINARY_PARAMS)
-    order = np.array(base + [get_noise_name(f) + '_noise' for f in filts])
+    order = np.array(base + [excess_scatter_name(f) for f in filts])
     _ORDER_CACHE[(use_norm, binary)] = (filts, order)
     return order
 
 
 def n_physical(use_norm, binary=False):
-    """Number of non-noise parameters ahead of the per-band noise terms."""
+    """Number of physical parameters ahead of the per-band excess-scatter
+    terms."""
     return (5 if use_norm else 6) + (len(BINARY_PARAMS) if binary else 0)
 
 

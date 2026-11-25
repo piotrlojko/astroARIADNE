@@ -79,7 +79,8 @@ $$
 \underbrace{d,\ R}_{\text{or } N},\ A_V,\ \{s_i\}\bigr),
 $$
 
-where $\{s_i\}$ are **per-band excess-noise (jitter) terms** described below.
+where $\{s_i\}$ are **per-band excess-scatter (jitter) terms**
+(`<band>_excess_scatter`) described below.
 Any parameter can be fixed; the "coordinator" array tracks which entries are
 free vs. held constant (`build_params`).
 
@@ -87,7 +88,7 @@ free vs. held constant (`build_params`).
 
 Band measurements are treated as independent Gaussians. To absorb
 underestimated catalogue errors and mild model inadequacy, each band carries an
-excess-noise term $s_i$ added in quadrature to its reported error. The
+excess-scatter term $s_i$ added in quadrature to its reported error. The
 log-likelihood is (`log_likelihood` / `fast_loglik`)
 
 $$

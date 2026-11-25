@@ -6,12 +6,16 @@ photometry utils module nor or SED model module.
 
 __all__ = ['estimate_pdf', 'estimate_cdf', 'norm_fit', 'credibility_interval',
            'display_routine', 'display_star_fin', 'display_star_init', 'end',
-           'get_noise_name', 'create_dir', 'execution_time', 'out_filler']
+           'get_band_tag', 'excess_scatter_name', 'is_excess_scatter',
+           'excess_scatter_label', 'upgrade_legacy_names',
+           'EXCESS_SCATTER_SUFFIX', 'get_noise_name', 'create_dir',
+           'execution_time', 'out_filler']
 
 import os
 import pickle
 import random
 import time
+import warnings
 from contextlib import closing
 
 from .config import colors
@@ -237,7 +241,7 @@ def end(coordinator, elapsed_time, out_folder, engine, use_norm,
     else:
         res_dir = f'{out_folder}/{engine}_out.pkl'
     with closing(open(res_dir, 'rb')) as jar:
-        out = pickle.load(jar)
+        out = upgrade_legacy_names(pickle.load(jar))
     binary = bool(out.get('binary', False))
 
     # Same layout as the fit's parameter vector (``coordinator``): the
@@ -252,8 +256,7 @@ def end(coordinator, elapsed_time, out_folder, engine, use_norm,
     star = out['star']
     mask = star.filter_mask
     for filt in star.filter_names[mask]:
-        p_ = get_noise_name(filt) + '_noise'
-        order = np.append(order, p_)
+        order = np.append(order, excess_scatter_name(filt))
 
     # Display name mapping
     display_names = {
@@ -292,7 +295,7 @@ def end(coordinator, elapsed_time, out_folder, engine, use_norm,
 
     # Physical parameters
     for i, p in enumerate(order):
-        if 'noise' in p:
+        if is_excess_scatter(p):
             continue
         name = display_names.get(p, p)
         med = out['best_fit_averaged'][p]
@@ -332,20 +335,15 @@ def end(coordinator, elapsed_time, out_folder, engine, use_norm,
         spt2 = out['spectral_type2']
         print(colored(f'{_T}{"Spectral type 2":24s}  {spt2:>12s}', c))
 
-    # Noise parameters
+    # Per-band excess scatter (magnitudes), added in quadrature to each
+    # band's error.
     print()
-    print(colored(f'{_T}{"Excess noise":24s}  {"Median":>12s}  {chr(0x00B1) + "1" + chr(0x03c3) + " CI":>20s}  {"3" + chr(0x03c3) + " CI":>20s}', c))
+    print(colored(f'{_T}{"Excess scatter (mag)":24s}  {"Median":>12s}  {chr(0x00B1) + "1" + chr(0x03c3) + " CI":>20s}  {"3" + chr(0x03c3) + " CI":>20s}', c))
     print(colored(f'{_T}{"-" * 82}', c))
     for i, p in enumerate(order):
-        if 'noise' not in p:
+        if not is_excess_scatter(p):
             continue
-        if 'SDSS' not in p and 'PS1' not in p:
-            p1, p2 = p.split('_')
-        else:
-            p1, p2, p3 = p.split('_')
-            p1 += '_' + p2
-            p2 = p3
-        name = f'{p1} {p2}'
+        name = str(p)[:-len(EXCESS_SCATTER_SUFFIX)]   # band, under the header
         med = out['best_fit_averaged'][p]
         unc = out['uncertainties_averaged'][p]
         ci = out['confidence_interval_averaged'][p]
@@ -421,8 +419,15 @@ def execution_time(start):
     return elapsed
 
 
-def get_noise_name(filt):
-    """Retrieve parameter name for white noise."""
+#: Suffix of the per-band excess-scatter parameters, e.g. ``W1_excess_scatter``.
+EXCESS_SCATTER_SUFFIX = '_excess_scatter'
+#: Suffix those parameters had before they were renamed (``W1_noise``).
+_LEGACY_SCATTER_SUFFIX = '_noise'
+
+
+def get_band_tag(filt):
+    """Short band name used in per-band parameter names (``W1``, ``BT``,
+    ``G``, ``IUE.1250-1300``...)."""
     if filt == 'TYCHO_B_MvB':
         return 'BT'
     if filt == 'TYCHO_V_MvB':
@@ -440,6 +445,59 @@ def get_noise_name(filt):
     if 'SDSS' in filt or 'PS1' in filt:
         return filt
     return filt.split('_')[-1]
+
+
+def excess_scatter_name(filt):
+    """Name of the excess-scatter parameter of band ``filt``.
+
+    Each fitted band has one: an extra uncertainty added in quadrature to the
+    band's reported error, for scatter the error bars do not capture
+    (variability, calibration offsets, underestimated errors). E.g.
+    ``excess_scatter_name('WISE_RSR_W1') == 'W1_excess_scatter'``.
+    """
+    return get_band_tag(filt) + EXCESS_SCATTER_SUFFIX
+
+
+def is_excess_scatter(name):
+    """Whether parameter ``name`` is a per-band excess-scatter term."""
+    return str(name).endswith(EXCESS_SCATTER_SUFFIX)
+
+
+def excess_scatter_label(name):
+    """Display label of an excess-scatter parameter:
+    ``'W1_excess_scatter'`` -> ``'W1 excess scatter'``."""
+    return str(name)[:-len(EXCESS_SCATTER_SUFFIX)] + ' excess scatter'
+
+
+def _upgraded_key(key):
+    if isinstance(key, str) and key.endswith(_LEGACY_SCATTER_SUFFIX):
+        return key[:-len(_LEGACY_SCATTER_SUFFIX)] + EXCESS_SCATTER_SUFFIX
+    return key
+
+
+def upgrade_legacy_names(obj):
+    """Rename the old ``<band>_noise`` keys to ``<band>_excess_scatter``.
+
+    Fit outputs written before the rename (``*_out.pkl``, ``BMA.pkl``) key
+    the excess-scatter terms ``<band>_noise``. This renames them in place, in
+    every nested dict, keeping the key order, so old outputs plot and can be
+    reused like new ones. Returns ``obj``.
+    """
+    if isinstance(obj, dict):
+        items = [(_upgraded_key(k), upgrade_legacy_names(v))
+                 for k, v in obj.items()]
+        obj.clear()
+        obj.update(items)
+    return obj
+
+
+def get_noise_name(filt):
+    """Deprecated: use :func:`get_band_tag` (or :func:`excess_scatter_name`
+    for the parameter name)."""
+    warnings.warn('get_noise_name is deprecated: use get_band_tag, or '
+                  'excess_scatter_name for the parameter name',
+                  DeprecationWarning, stacklevel=2)
+    return get_band_tag(filt)
 
 
 def out_filler(samp, logdat, param, name, out, fmt='f', fixed=False,

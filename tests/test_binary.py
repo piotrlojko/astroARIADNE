@@ -57,13 +57,13 @@ def test_one_grid_serves_both_components(grids):
 
 def test_residuals_start_after_the_secondary(grids):
     p = grids['phoenix']
-    noise = np.arange(1, len(BANDS) + 1) * 1e-12
-    th = np.r_[THETA, noise]
+    scatter = np.arange(1, len(BANDS) + 1) * 1e-12
+    th = np.r_[THETA, scatter]
     flux = model_grid(THETA, BANDS, WAVE, p, False, LAW, binary=True)
     res, ers = get_residuals(th, flux, np.zeros(len(BANDS)), WAVE, BANDS, p,
                              False, LAW, binary=True)
     np.testing.assert_allclose(res, 0, atol=1e-30)
-    np.testing.assert_allclose(ers, noise)
+    np.testing.assert_allclose(ers, scatter)
 
 
 def test_contrast_is_m2_minus_m1_and_independent_of_distance(grids):
@@ -280,7 +280,8 @@ def test_end_to_end_binary_fit_and_plots(tmp_path, grids):
            'rad': ('uniform', 1.5, 3.0), 'Av': ('normal', 0.38, 0.02),
            'teff2': ('uniform', 20000, 40000), 'logg2': ('uniform', 4.0, 4.75),
            'rad2': ('uniform', 0.05, 0.6),
-           'IUE.1250-1300_noise': ('fixed', 0), 'WIDE.1565_noise': ('fixed', 0)}
+           'IUE.1250-1300_excess_scatter': ('fixed', 0),
+           'WIDE.1565_excess_scatter': ('fixed', 0)}
     f = _fitter(tmp_path, star=star, priors=pri, grid='bosz', grid2='tlusty',
                 nlive=60)
     f.initialize()
@@ -309,7 +310,7 @@ def test_end_to_end_binary_fit_and_plots(tmp_path, grids):
     p.plot_SED()
     # The SED axis is lambda F_lambda, so error bars are lambda * sigma_F:
     # never shorter than the measurement error, and exactly it for the UV
-    # bands whose excess noise is fixed at zero.
+    # bands whose excess scatter is fixed at zero.
     import matplotlib.pyplot as plt
     from matplotlib.container import ErrorbarContainer
     bars = [c for c in plt.gcf().axes[0].containers
@@ -321,7 +322,31 @@ def test_end_to_end_binary_fit_and_plots(tmp_path, grids):
         assert half >= fe * w * (1 - 1e-9)
         if w < 0.2:
             assert half == pytest.approx(fe * w, rel=1e-9)
+    # components in their own colours, the sum in black
+    from matplotlib.colors import to_hex
+    lines = {ln.get_label().split(':')[0]: to_hex(ln.get_color())
+             for ln in plt.gcf().axes[0].get_lines()}
+    assert lines['Primary'] == '#112b42'
+    assert lines['Secondary'] == '#592615'
+    assert lines['Sum'] == '#000000'
     plt.close('all')
     p.plot_corner()
     assert (tmp_path / 'plots' / 'SED.png').exists()
+    assert 'IUE.1250-1300_excess_scatter' in ps
+
+    # An output written before the rename (<band>_noise) still opens.
+    def _legacy(d):
+        if isinstance(d, dict):
+            return {(k[:-len('_excess_scatter')] + '_noise'
+                     if isinstance(k, str) and k.endswith('_excess_scatter')
+                     else k): _legacy(v) for k, v in d.items()}
+        return d
+    old = tmp_path / 'old_out.pkl'
+    with open(old, 'wb') as fh:
+        pickle.dump(_legacy(out), fh)
+    po = SEDPlotter(str(old), str(tmp_path / 'plots_old'), pdf=False)
+    assert 'G_excess_scatter' in po.order
+    assert not any(k.endswith('_noise') for k in po.out['posterior_samples'])
+    po.plot_SED()
+    plt.close('all')
     assert (tmp_path / 'plots' / 'CORNER.png').exists()
