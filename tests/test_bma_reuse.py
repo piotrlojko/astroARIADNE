@@ -111,3 +111,38 @@ def test_older_output_reused_with_note(tmp_path, monkeypatch, capsys):
     fitted, _ = _run(monkeypatch, _fitter(tmp_path, ['phoenix']))
     assert fitted == []
     assert 'not checked' in capsys.readouterr().out
+
+
+def test_extinction_law_is_recorded_the_same_in_every_run(tmp_path,
+                                                          monkeypatch,
+                                                          capsys):
+    # The law is recorded by name. Outputs written before recorded
+    # str(function), whose memory address changes from run to run, so they
+    # were never reused by a later run.
+    import extinction
+    f = _fitter(tmp_path, ['phoenix', 'btsettl', 'kurucz'])
+    f._av_law = extinction.fitzpatrick99
+    sig = f._fit_signature()
+    assert sig['av_law'] == 'fitzpatrick'
+    _fake_out(tmp_path, 'phoenix', signature=sig)
+    _fake_out(tmp_path, 'btsettl', signature=dict(        # older, another run
+        sig, av_law='<cyfunction fitzpatrick99 at 0x7acfb61d9900>'))
+    _fake_out(tmp_path, 'kurucz', signature=dict(         # another law
+        sig, av_law='<cyfunction ccm89 at 0x7d90b43d9900>'))
+    fitted, _ = _run(monkeypatch, f)
+    assert fitted == ['kurucz']
+    assert 'extinction law changed' in capsys.readouterr().out
+
+
+def test_output_from_before_the_excess_scatter_rename_is_reused(tmp_path,
+                                                                monkeypatch):
+    f = _fitter(tmp_path, ['phoenix'])
+    f.priors = dict(f.priors, G_excess_scatter=st.truncnorm(
+        a=0, b=10, loc=0, scale=1e-11))
+    sig = f._fit_signature()
+    old = dict(sig, priors={k.replace('_excess_scatter', '_noise'): v
+                            for k, v in sig['priors'].items()})
+    assert 'G_noise' in old['priors']
+    _fake_out(tmp_path, 'phoenix', signature=old)
+    fitted, _ = _run(monkeypatch, f)
+    assert fitted == []

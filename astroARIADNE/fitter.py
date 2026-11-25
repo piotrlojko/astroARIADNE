@@ -7,6 +7,7 @@ import copy
 import logging
 import os
 import pickle
+import re
 import time
 import warnings
 
@@ -223,6 +224,29 @@ def _check_excess_scatter_setup(prior_setup, scatter):
                 continue
         keys.append(k)
     return keys
+
+
+#: User-facing extinction-law names of the ``extinction`` functions.
+_AV_LAW_NAMES = {'ccm89': 'cardelli', 'odonnell94': 'odonnell',
+                 'calzetti00': 'calzetti', 'fitzpatrick99': 'fitzpatrick'}
+_FUNC_REPR = re.compile(r'<(?:cy|built-in )?function ([A-Za-z_]\w*)')
+
+
+def _av_law_name(law):
+    """Run-independent name of an extinction law, for fit signatures.
+
+    Accepts the law function (``extinction.fitzpatrick99`` ->
+    ``'fitzpatrick'``), a law name, or what signatures written before this
+    stored, ``str(function)``: ``'<cyfunction fitzpatrick99 at 0x7f...>'``,
+    whose memory address changes from run to run.
+    """
+    if law is None:
+        return None
+    name = getattr(law, '__name__', None) if callable(law) else None
+    if name is None:
+        m = _FUNC_REPR.match(str(law))
+        name = m.group(1) if m else str(law)
+    return _AV_LAW_NAMES.get(name, name)
 
 
 def _prior_signature(prior):
@@ -578,7 +602,7 @@ class Fitter:
                       getattr(self, '_bound', None),
                       getattr(self, '_sample', None),
                       getattr(self, '_dynamic', None)),
-            'av_law': str(getattr(self, '_av_law', None)),
+            'av_law': _av_law_name(getattr(self, '_av_law', None)),
             'fixed': [float(x) for x in np.ravel(self.fixed)],
             'coordinator': [int(x) for x in np.ravel(self.coordinator)],
             'binary': bool(self._binary),
@@ -615,6 +639,8 @@ class Fitter:
                             ' (older output: priors and sampler settings '
                             'not recorded, so not checked)')
         if sig is not None:
+            # older signatures recorded the law with a per-run memory address
+            sig = dict(sig, av_law=_av_law_name(sig.get('av_law')))
             cur = self._fit_signature()
             for key, what in (('priors', 'priors'),
                               ('setup', 'sampler settings'),

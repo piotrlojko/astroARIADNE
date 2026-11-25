@@ -84,6 +84,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local editable isochrones.
 
 ### Fixed
+- `fit_bma` never reused a `<grid>_out.pkl` written by an earlier run
+  (`refit = False`): the fit signature recorded the extinction law as
+  `str(function)`, which includes a memory address that changes from run to
+  run, so every grid was refitted as "extinction law changed". The law is now
+  recorded by name, and outputs written before are compared by the function
+  name in their record.
 - The SED plots printed stray minor tick labels (e.g. 2x10^-1) over the
   bottom of the model panel and beside the wavelength axis.
 - The corner plot was saved once per parameter instead of once.
