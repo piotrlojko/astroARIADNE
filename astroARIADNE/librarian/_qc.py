@@ -103,8 +103,20 @@ def _qc_galex_band(row, pyphot_name):
 
 
 def _qc_skymapper(row):
-    """SkyMapper: flags must be 0."""
+    """SkyMapper DR2 rule for a whole row: flags must be 0 in every band.
+
+    No longer used by the librarian, which reads DR4 band by band
+    (``_qc_skymapper_band``)."""
     flags = _col(row, "flags")
     if flags is None:
         return False
     return int(flags) == 0
+
+
+def _qc_skymapper_band(flags, ngood):
+    """SkyMapper DR4, one band: no flag set in that band (``<f>_flags`` 0;
+    4 is saturation) and at least one good measurement (``<f>_ngood``)."""
+    try:
+        return int(flags) == 0 and int(ngood) >= 1
+    except (TypeError, ValueError):
+        return False

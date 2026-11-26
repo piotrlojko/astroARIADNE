@@ -368,6 +368,10 @@ you would do:
 s.add_mag(13.751, 0.032, 'PS1_r')
 ```
 
+SkyMapper photometry is read from DR4 (Onken et al. 2024) band by band: a band
+is used when DR4 sets no flag in it and at least one good measurement went into
+it, so a bright star saturated in g, r and i still contributes u, v and z.
+
 If the photometry is published as a flux rather than a magnitude, add it with
 `add_flux`, giving the flux and its error as `astropy` quantities in any
 spectral flux density unit: f_lambda (e.g. erg s^-1 cm^-2 A^-1), f_nu (Jy,

@@ -362,6 +362,51 @@ def _cone(catalog, center, radius, timeout):
 TIC_VIZIER = "IV/39/tic82"
 
 
+SKYMAPPER_VIZIER = "II/379/smssdr4"
+SKYMAPPER_FILTERS = "uvgriz"
+
+
+def skymapper_from_vizier(center, radius, gaia_id, object_id=None,
+                          timeout=60):
+    """A star's SkyMapper DR4 row from VizieR (II/379/smssdr4), keyed like
+    the SkyMapper TAP service's ``dr4.master``.
+
+    For when that service fails or does not know the object. The row is the
+    one DR4 cross-matches to ``gaia_id`` (``Gaia3Id1``), else the one with
+    ``object_id``. VizieR spells ``u_psf`` / ``e_u_psf`` / ``u_flags`` /
+    ``u_ngood`` as ``uPSF`` / ``e_uPSF`` / ``flagsu`` / ``Ngoodu``. Returns
+    None when the star is not in the answer; raises when VizieR fails.
+    """
+    tbl = _cone(SKYMAPPER_VIZIER, center, radius, timeout)
+    if tbl is None:
+        return None
+
+    def val(row, col):
+        if col not in tbl.colnames or np.ma.is_masked(row[col]):
+            return None
+        return row[col]
+
+    row = None
+    for col, want in (("Gaia3Id1", gaia_id), ("ObjectId", object_id)):
+        if want is None or col not in tbl.colnames:
+            continue
+        hits = [r for r in tbl if val(r, col) is not None
+                and int(r[col]) == int(want)]
+        if hits:
+            row = hits[0]
+            break
+    if row is None:
+        return None
+    out = {"object_id": val(row, "ObjectId"),
+           "gaia_dr3_id1": val(row, "Gaia3Id1")}
+    for f in SKYMAPPER_FILTERS:
+        out[f"{f}_psf"] = val(row, f"{f}PSF")
+        out[f"e_{f}_psf"] = val(row, f"e_{f}PSF")
+        out[f"{f}_flags"] = val(row, f"flags{f}")
+        out[f"{f}_ngood"] = val(row, f"Ngood{f}")
+    return out
+
+
 def tic_from_vizier(center, radius, gaia_id, timeout=60):
     """A star's TIC-8 row from VizieR (IV/39/tic82), keyed like MAST's TIC.
 

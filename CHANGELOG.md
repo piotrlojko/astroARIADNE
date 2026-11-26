@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   convolved from the same spectra. See `filters.md`.
 
 ### Changed
+- **SkyMapper photometry comes from DR4, band by band.** The librarian read
+  SkyMapper DR2 and dropped all six bands when the row's single flag was set,
+  so a bright star saturated in g, r and i lost its u, v and z too. It now
+  reads DR4 (Onken et al. 2024) from the SkyMapper TAP service, or from VizieR
+  (II/379/smssdr4) when that fails or has no row for the Gaia source, and
+  keeps each band that DR4 does not flag and that has at least one good
+  measurement. A V ~ 9 star typically gains u, v and z this way.
 - **Extinction is integrated over each band.** Model band fluxes used to be
   reddened with the extinction at the band's central wavelength. Over a wide
   band the extinction changes with wavelength, so that misstated the reddened

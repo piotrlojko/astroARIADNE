@@ -40,6 +40,7 @@ from ._qc import (
     _qc_ps1,
     _qc_sdss,
     _qc_skymapper,
+    _qc_skymapper_band,
     _qc_wise_band,
     _qc_wise_extended,
 )

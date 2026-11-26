@@ -83,6 +83,15 @@ class CatalogDef:
 # ── Helpers ──────────────────────────────────────────────────────
 
 _QUERY_TIMEOUT = 60  # seconds per network query
+_SKYMAPPER_TAP = "https://api.skymapper.nci.org.au/public/tap/"
+
+
+def _int_or_none(v):
+    """``v`` as an int (catalogue IDs come as numpy ints, strings or masked)."""
+    try:
+        return int(v)
+    except (TypeError, ValueError, ma.MaskError):
+        return None
 
 
 class _TimedOut(Exception):
@@ -357,6 +366,7 @@ from ._qc import (
     _qc_ps1,
     _qc_sdss,
     _qc_skymapper,
+    _qc_skymapper_band,
     _qc_wise_band,
     _qc_wise_extended,
 )
@@ -455,7 +465,6 @@ _CATALOGS = {
         ),
         xmatch_table="skymapperdr2",
         xmatch_id_cols=("ObjectId", "object_id"),
-        qc=_qc_skymapper,
     ),
     "TESS": CatalogDef(
         vizier_id=None,
@@ -1114,36 +1123,59 @@ class Librarian(ContaminationMixin):
                 self._add_mag(band.pyphot, float(mag_v), err_f, src="APASS")
 
     def _fetch_skymapper(self):
-        """Query SkyMapper DR2 via SkyMapper TAP service."""
-        sm_id = self._ids.get("SkyMapper")
-        if sm_id is None:
-            return
+        """SkyMapper DR4 (Onken et al. 2024) PSF magnitudes, band by band.
 
-        from astroquery.utils.tap.core import TapPlus
+        From the SkyMapper TAP service (``dr4.master``), or from VizieR
+        (II/379/smssdr4) when that fails or has no row for this Gaia source.
+        A band is kept when DR4 sets no flag in it and at least one good
+        measurement with an error went into it, so a bright star saturated
+        in g, r and i still gives its u, v and z. (DR2's single flag for all
+        bands used to drop every band of such a star.)
+        """
+        sm_id = _int_or_none(self._ids.get("SkyMapper"))
+        row = None
+        if sm_id is not None:
+            from astroquery.utils.tap.core import TapPlus
 
-        tap = TapPlus(url="https://api.skymapper.nci.org.au/public/tap/")
-        query = (
-            "SELECT object_id, u_psf, e_u_psf, v_psf, e_v_psf, "
-            "g_psf, e_g_psf, r_psf, e_r_psf, i_psf, e_i_psf, "
-            "z_psf, e_z_psf, flags "
-            f"FROM dr2.master WHERE object_id = {int(sm_id)}"
-        )
-        result = _tap_query(tap, query)
-        if result is None or len(result) == 0:
-            return
-
-        row = result[0]
-        if not _qc_skymapper(row):
-            return
+            tap = TapPlus(url=_SKYMAPPER_TAP)
+            cols = ", ".join(
+                ["object_id", "gaia_dr3_id1"]
+                + [f"{f}_psf, e_{f}_psf, {f}_flags, {f}_ngood"
+                   for f in _cds.SKYMAPPER_FILTERS])
+            result = _tap_query(
+                tap, f"SELECT {cols} FROM dr4.master WHERE object_id = {sm_id}")
+            if result is not None and len(result) > 0:
+                row = result[0]
+                # The ID can come from a positional fallback; DR4's own Gaia
+                # DR3 match must agree.
+                gid = _int_or_none(_col(row, "gaia_dr3_id1"))
+                if gid is not None and gid != int(self._gaia_id):
+                    row = None
+        if row is None:
+            try:
+                row = _cds.skymapper_from_vizier(
+                    self._coord, self._search_radius, self._gaia_id, sm_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SkyMapper DR4 failed on TAP and on VizieR: %s",
+                               exc)
+                return
+            if row is None:
+                return
+            logger.info("SkyMapper DR4 served by VizieR %s",
+                        _cds.SKYMAPPER_VIZIER)
 
         for band in _CATALOGS["SkyMapper"].bands:
             if band.pyphot in self._magnitudes:
                 continue
+            f = band.pyphot[-1]
+            if not _qc_skymapper_band(_col(row, f"{f}_flags"),
+                                      _col(row, f"{f}_ngood")):
+                continue
             mag_v = _col(row, band.col)
             err_v = _col(row, band.err_col)
-            if _qc_mag(mag_v, err_v):
-                err_f = float(err_v) if err_v is not None else 0.02
-                self._add_mag(band.pyphot, float(mag_v), err_f)
+            # DR4 gives saturated bands a magnitude but no error.
+            if err_v is not None and _qc_mag(mag_v, err_v):
+                self._add_mag(band.pyphot, float(mag_v), float(err_v))
 
     def _fetch_galex(self):
         """Query GALEX via VizieR XMatch with Gaia DR3."""
