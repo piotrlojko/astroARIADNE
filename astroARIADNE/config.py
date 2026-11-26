@@ -58,6 +58,79 @@ filter_names = np.array([
        'HST_ACS_WFC_F775W', 'HST_ACS_WFC_F814W', 'HST_ACS_WFC_F850LP',
 ])
 
+# Labels of the filters on plots (matplotlib mathtext), in each survey's own
+# notation: italic band symbols, roman subscripts (G_BP, K_s, R_C, g_P1),
+# roman names for WISE W1-W4, GALEX FUV/NUV, IRAC [3.6]/[4.5] and HST filters,
+# upright units.
+# Used only by the plotting code (plotter.filter_label); a filter missing here
+# is labelled by its name with spaces for underscores.
+filter_labels = {
+    'GALEX_FUV': 'GALEX FUV',
+    'GALEX_NUV': 'GALEX NUV',
+    'STROMGREN_u': r'Strömgren $u$',
+    'STROMGREN_v': r'Strömgren $v$',
+    'STROMGREN_b': r'Strömgren $b$',
+    'STROMGREN_y': r'Strömgren $y$',
+    'SkyMapper_u': r'SkyMapper $u$',
+    'SkyMapper_v': r'SkyMapper $v$',
+    'SkyMapper_g': r'SkyMapper $g$',
+    'SkyMapper_r': r'SkyMapper $r$',
+    'SkyMapper_i': r'SkyMapper $i$',
+    'SkyMapper_z': r'SkyMapper $z$',
+    'SDSS_u': r'SDSS $u$',
+    'SDSS_g': r'SDSS $g$',
+    'SDSS_r': r'SDSS $r$',
+    'SDSS_i': r'SDSS $i$',
+    'SDSS_z': r'SDSS $z$',
+    'PS1_g': r'PS1 $g_{\rm P1}$',
+    'PS1_r': r'PS1 $r_{\rm P1}$',
+    'PS1_i': r'PS1 $i_{\rm P1}$',
+    'PS1_z': r'PS1 $z_{\rm P1}$',
+    'PS1_y': r'PS1 $y_{\rm P1}$',
+    'PS1_w': r'PS1 $w_{\rm P1}$',
+    'GROUND_JOHNSON_U': r'Johnson $U$',
+    'GROUND_JOHNSON_B': r'Johnson $B$',
+    'GROUND_JOHNSON_V': r'Johnson $V$',
+    'GROUND_COUSINS_R': r'Cousins $R_{\rm C}$',
+    'GROUND_COUSINS_I': r'Cousins $I_{\rm C}$',
+    'TYCHO_B_MvB': r'Tycho $B_T$',
+    'TYCHO_V_MvB': r'Tycho $V_T$',
+    'GaiaDR2v2_G': r'Gaia $G$',
+    'GaiaDR2v2_BP': r'Gaia $G_{\rm BP}$',
+    'GaiaDR2v2_RP': r'Gaia $G_{\rm RP}$',
+    'KEPLER_Kp': r'Kepler $K_p$',
+    'NGTS_I': 'NGTS',
+    'TESS': r'TESS $T$',
+    '2MASS_J': r'2MASS $J$',
+    '2MASS_H': r'2MASS $H$',
+    '2MASS_Ks': r'2MASS $K_{\rm s}$',
+    'WISE_RSR_W1': 'WISE W1',
+    'WISE_RSR_W2': 'WISE W2',
+    'WISE_RSR_W3': 'WISE W3',
+    'WISE_RSR_W4': 'WISE W4',
+    'SPITZER_IRAC_36': 'IRAC [3.6]',
+    'SPITZER_IRAC_45': 'IRAC [4.5]',
+    'HERSCHEL_PACS_BLUE': r'PACS 70 $\mathrm{\mu}$m',
+    'HERSCHEL_PACS_GREEN': r'PACS 100 $\mathrm{\mu}$m',
+    'HERSCHEL_PACS_RED': r'PACS 160 $\mathrm{\mu}$m',
+}
+# IUE boxes and TD-1 bands by wavelength range / centre; HST filters by
+# instrument and channel (the WFC3 IR channel's filters, else UVIS).
+_WFC3_IR = {'F098M', 'F105W', 'F110W', 'F125W', 'F127M', 'F139M', 'F140W',
+            'F153M', 'F160W'}
+_ANGSTROM = r' $\mathrm{\AA}$'
+for _f in filter_names:
+    if _f.startswith('IUE_IUE.'):
+        filter_labels[_f] = 'IUE ' + _f[8:].replace('-', '–') + _ANGSTROM
+    elif _f.startswith('TD1_WIDE.'):
+        filter_labels[_f] = 'TD-1 ' + _f[9:] + _ANGSTROM
+    elif _f.startswith('HST_WFC3_'):
+        filter_labels[_f] = ('WFC3/IR ' if _f[9:] in _WFC3_IR
+                             else 'WFC3/UVIS ') + _f[9:]
+    elif _f.startswith('HST_ACS_WFC_'):
+        filter_labels[_f] = 'ACS/WFC ' + _f[12:]
+del _f
+
 # Bands add_mag routes to the IR-excess set instead of the fit.
 irx_bands = frozenset(['WISE_RSR_W3', 'WISE_RSR_W4', 'HERSCHEL_PACS_BLUE',
                        'HERSCHEL_PACS_GREEN', 'HERSCHEL_PACS_RED'])

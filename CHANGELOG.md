@@ -43,10 +43,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   convolved from the same spectra. See `filters.md`.
 
 ### Changed
+- **SED plots show both uncertainties of each point.** The measurement error
+  sigma_obs is drawn solid with small caps, in front of the total uncertainty
+  the fit used, sigma_tot = sqrt(sigma_obs^2 + s^2) with the fitted excess
+  scatter s, dotted without caps, in both panels; the legend names both. The
+  residual panel, in units of sigma_tot, now says so (its y label and the
+  definition written under it) and is tall enough for the +-1 sigma_tot bars.
+  Before, the main panel showed only sigma_tot and the residual panel only
+  sigma_obs / sigma_tot, so a band with a large fitted scatter looked more
+  precise than one whose scatter was fixed at zero.
 - **Excess-scatter terms can be bounded.** `prior_setup` takes
   `('uniform', low, up)` and `('truncnorm', mu, sigma, low, up)` for
   `<band>_excess_scatter`, in magnitudes (as the outputs report the scatter);
   they used to fall back to the default half-normal. Bad bounds stop the fit.
+- **SED plots name the filters in each survey's notation.** The filter legend
+  showed pyphot names (`GaiaDR2v2_BP`, `2MASS_Ks`, `TYCHO_B_MvB`); it now
+  shows Gaia $G_{\rm BP}$, 2MASS $K_{\rm s}$, Tycho $B_T$, PS1 $g_{\rm P1}$,
+  WISE W1, IRAC [3.6], IUE 1250–1300 Å, WFC3/UVIS F275W and so on, from
+  `config.filter_labels` (one mathtext label per recognised filter). Only the
+  plots use them; a band without a label shows its name with spaces for
+  underscores.
 - **SkyMapper photometry comes from DR4, band by band.** The librarian read
   SkyMapper DR2 and dropped all six bands when the row's single flag was set,
   so a bright star saturated in g, r and i lost its u, v and z too. It now
@@ -123,6 +139,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scatter came out 15 % too large, in the outputs and in the SED plot's
   error bars. The sampling was not affected; refit (or rerun with
   `refit = True`) for correct outputs.
+- `SEDPlotter.plot_SED` converted the plotted excess scatter from magnitudes
+  to flux in `self.theta` itself, so a second `plot_SED` call converted it
+  again (and drew the error bars without it), and a dynesty trace plot drawn
+  afterwards (`plot_like`) took the flux values as its excess-scatter truths.
+  It now converts a copy.
 - `fit_bma` never reused a `<grid>_out.pkl` written by an earlier run
   (`refit = False`): the fit signature recorded the extinction law as
   `str(function)`, which includes a memory address that changes from run to

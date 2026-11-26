@@ -29,7 +29,8 @@ from scipy.stats import gaussian_kde, norm
 import corner
 from dynesty import plotting as dyplot
 
-from .config import (filesdir, gridsdir, modelsdir, spectra_cache)
+from .config import (filesdir, filter_labels, gridsdir, modelsdir,
+                     spectra_cache)
 from .isochrone import get_isochrone
 from .phot_utils import *
 from .sed_library import *
@@ -47,6 +48,15 @@ _GRID_LABELS = {
 
 _FLUX_LABEL = r'$\lambda F_\lambda$ (erg cm$^{-2}$ s$^{-1}$)'
 _WAVE_LABEL = r'$\lambda$ ($\mu$m)'
+_SIGMA_TOT_LABEL = r'$\sigma_{\rm tot} = \sqrt{\sigma_{\rm obs}^2 + s^2}$'
+
+
+def filter_label(name):
+    """Plot label of a band: its ``config.filter_labels`` entry (mathtext,
+    in the survey's own notation), else the name with spaces for
+    underscores."""
+    name = str(name)
+    return filter_labels.get(name, name.replace('_', ' '))
 
 
 def _grid_label(name):
@@ -519,6 +529,32 @@ class SEDPlotter:
             ax.xaxis.set_major_formatter(ticker.NullFormatter())
         ax.set_xlim(xlims)
 
+    # Error-bar style: the measurement error solid with small caps, in front
+    # of the fit's total uncertainty, dotted and without caps.
+    _CAP = 2.5
+
+    def _error_bars(self, ax, x, y, xerr, yerr_obs, color, yerr_tot=None):
+        """A point's bandpass and measurement error (solid, small caps) and,
+        with ``yerr_tot``, the total uncertainty of the fit behind them
+        (dotted, no caps), all in ``color``."""
+        if yerr_tot is not None:
+            tot = ax.errorbar(x, y, yerr=yerr_tot, fmt='none', ecolor=color,
+                              elinewidth=1.5, capsize=0, zorder=1)
+            tot[2][0].set_linestyle(':')
+        ax.errorbar(x, y, xerr=xerr, yerr=yerr_obs, fmt='none', ecolor=color,
+                    elinewidth=1.5, capsize=self._CAP, capthick=1.5,
+                    zorder=1.5)
+
+    def _error_bar_handle(self, ax, label, total=False):
+        """Legend entry of an error-bar style (see ``_error_bars``)."""
+        h = ax.errorbar([np.nan], [np.nan], yerr=[1.0], fmt='none',
+                        ecolor='0.35', elinewidth=1.5,
+                        capsize=0 if total else self._CAP, capthick=1.5,
+                        label=label)
+        if total:
+            h[2][0].set_linestyle(':')
+        return h
+
     def _side_legends(self, ax, handles, filters, waves, colors,
                       bottom=None):
         """Legends in a column right of ``ax``: ``handles`` (model curves and
@@ -544,7 +580,7 @@ class SEDPlotter:
         ms = np.sqrt(self.scatter_size)
         fhandles = [Line2D([], [], ls='', marker=self.marker, ms=ms,
                            mfc=colors[i], mec='black', mew=0.6,
-                           label=str(filters[i]))
+                           label=filter_label(filters[i]))
                     for i in order]
         # Rows that fit between ``top`` and the bottom of the lowest panel.
         low = (bottom or ax).get_position().y0 * fig.bbox.height
@@ -800,12 +836,7 @@ class SEDPlotter:
                 point_colors,
                 self.wave, self.flux, self.flux_er,
                 self.bandpass, used_f):
-            ax.errorbar(w, fl * w,
-                        xerr=bp, yerr=fe * w,
-                        fmt='',
-                        ecolor=c,
-                        elinewidth=1.5,
-                        marker=None)
+            self._error_bars(ax, w, fl * w, bp, fe * w, c)
 
             ax.scatter(w, fl * w,
                        edgecolors='black',
@@ -902,16 +933,22 @@ class SEDPlotter:
         filters = self.star.filter_names[mask]
         wave = self.star.wave[mask]
 
-        for i, th in enumerate(self.theta[n_pars:]):
+        # The excess scatter s of the plotted parameter vector, magnitudes ->
+        # flux, in a copy: self.theta keeps magnitudes, so a second call (and
+        # plot_like's trace-plot truths) see the same values.
+        theta = np.array(self.theta, dtype=float)
+        for i, th in enumerate(theta[n_pars:]):
             mag = mags[i]
             filt = filters[i]
             _, er = mag_to_flux(
                 mag, th, filt,
                 (getattr(self.star, 'mag_system', None) or {}).get(filt))
-            self.theta[n_pars + i] = er
+            theta[n_pars + i] = er
 
+        # errors: sigma_tot = sqrt(sigma_obs^2 + s^2), the uncertainty the fit
+        # used; residuals are in units of it.
         residuals, errors = get_residuals(
-            self.theta, flxs, errs, wave, filters, self.interpolator, self.norm,
+            theta, flxs, errs, wave, filters, self.interpolator, self.norm,
             self.av_law, binary=self.binary)
 
         norm_res = residuals / errors
@@ -934,14 +971,14 @@ class SEDPlotter:
                              rf'$T_{{\rm eff}}$ = {self.theta[0]:.0f} K')
 
         # Model plot: observed fluxes as circles coloured by band (see the
-        # filter legend), synthetic model fluxes as open diamonds. The axis is
-        # lambda F_lambda, so the F_lambda errors (measurement error and
-        # fitted excess scatter in quadrature) are scaled by lambda too.
+        # filter legend), synthetic model fluxes as open diamonds. Each point
+        # has its measurement error (solid) in front of the total uncertainty
+        # of the fit (dotted). The axis is lambda F_lambda, so the F_lambda
+        # errors are scaled by lambda too.
         colors = self._filter_colors(self.wave)
-        for w, fl, bp, er, c in zip(self.wave, self.flux, self.bandpass,
-                                    errors, colors):
-            ax.errorbar(w, fl * w, xerr=bp, yerr=er * w, fmt='none',
-                        ecolor=c, elinewidth=1.5, zorder=1)
+        for w, fl, bp, eo, et, c in zip(self.wave, self.flux, self.bandpass,
+                                        self.flux_er, errors, colors):
+            self._error_bars(ax, w, fl * w, bp, eo * w, c, yerr_tot=et * w)
         ax.scatter(self.wave, self.flux * self.wave,
                    edgecolors='black', linewidths=0.6, marker=self.marker,
                    c=colors, s=self.scatter_size, zorder=2,
@@ -970,10 +1007,11 @@ class SEDPlotter:
         # Residual plot
         ax_r.axhline(y=0, lw=2, ls='--', c='k', alpha=.7)
 
-        for w, r, bp, re_, c in zip(self.wave, norm_res, self.bandpass,
-                                    np.array(self.flux_er) / errors, colors):
-            ax_r.errorbar(w, r, xerr=bp, yerr=re_, fmt='none', ecolor=c,
-                          elinewidth=1.5, zorder=2)
+        # In units of sigma_tot the total uncertainty is +-1 and the
+        # measurement error sigma_obs / sigma_tot.
+        for w, r, bp, eo, et, c in zip(self.wave, norm_res, self.bandpass,
+                                       self.flux_er, errors, colors):
+            self._error_bars(ax_r, w, r, bp, eo / et, c, yerr_tot=1.0)
         ax_r.scatter(self.wave, norm_res, zorder=3,
                      edgecolors='black', linewidths=0.6, marker=self.marker,
                      c=colors, s=self.scatter_size,
@@ -1000,14 +1038,21 @@ class SEDPlotter:
         # Formatting
         res_std = norm_res.std()
         ax.set_ylim([ymin * 0.6, ymax * 1.5])
-        # +-5 standard deviations of the residuals, widened to show them all.
-        res_lim = max(5 * res_std, 1.25 * np.max(np.abs(norm_res)))
+        # +-5 standard deviations of the residuals, widened to show them all
+        # with their +-1 sigma_tot bars.
+        res_lim = max(5 * res_std, 1.15 * np.max(np.abs(norm_res) + 1))
         ax_r.set_ylim([-res_lim, res_lim])
         ax.set_yscale('log', nonpositive='clip')
         ax_r.set_xlabel(_WAVE_LABEL, fontsize=self.fontsize)
         ax.set_ylabel(_FLUX_LABEL, fontsize=self.fontsize)
-        ax_r.set_ylabel('Residuals\n' + r'($\sigma$)',
+        ax_r.set_ylabel('Residuals\n' + r'($\sigma_{\rm tot}$)',
                         fontsize=self.tick_labelsize)
+        # The unit, spelt out under the panel's right end (the y label has no
+        # room for it).
+        ax_r.annotate(_SIGMA_TOT_LABEL, xy=(1, 0), xycoords='axes fraction',
+                      xytext=(0, -0.62 * self.tick_labelsize - 12),
+                      textcoords='offset points', ha='right', va='top',
+                      fontsize=self.legend_fontsize)
         for a in (ax, ax_r):
             a.tick_params(axis='both', which='major',
                           labelsize=self.tick_labelsize)
@@ -1029,6 +1074,10 @@ class SEDPlotter:
         handles += [
             Line2D([], [], ls='', marker=self.marker, ms=ms, mfc='0.8',
                    mec='black', mew=0.6, label='Observed'),
+            self._error_bar_handle(ax, r'$\pm\sigma_{\rm obs}$ (measured)'),
+            self._error_bar_handle(
+                ax, r'$\pm\sigma_{\rm tot}$ (with fitted excess scatter $s$)',
+                total=True),
             Line2D([], [], ls='', marker=self.marker_model, ms=ms * 1.1,
                    mfc='none', mec=self.marker_colors_model, mew=2,
                    label='Model (synthetic photometry)'),

@@ -320,21 +320,55 @@ def test_end_to_end_binary_fit_and_plots(tmp_path, grids):
     assert all(it.band_extinction for it in p.interpolator)
     i = int(np.argmax(ps['loglike']))
     assert p.theta[6] == ps['teff2'][i]          # max-likelihood sample
+    theta = p.theta.copy()
     p.plot_SED()
-    # The SED axis is lambda F_lambda, so error bars are lambda * sigma_F:
-    # never shorter than the measurement error, and exactly it for the UV
-    # bands whose excess scatter is fixed at zero.
+    # plot_SED leaves the plotted vector alone (its excess scatter stays in
+    # magnitudes), so it can be drawn again
+    np.testing.assert_array_equal(p.theta, theta)
+    # Each point: the measurement error solid with caps, in front of the
+    # total uncertainty sigma_tot = sqrt(sigma_obs^2 + s^2) dotted without.
+    # The SED axis is lambda F_lambda, so error bars are lambda * sigma_F.
     import matplotlib.pyplot as plt
     from matplotlib.container import ErrorbarContainer
-    bars = [c for c in plt.gcf().axes[0].containers
-            if isinstance(c, ErrorbarContainer)]
-    assert len(bars) == len(p.wave)
-    for c, w, fe in zip(bars, p.wave, p.flux_er):
-        (_, y0), (_, y1) = c.lines[2][-1].get_segments()[0]
-        half = (y1 - y0) / 2
-        assert half >= fe * w * (1 - 1e-9)
-        if w < 0.2:
-            assert half == pytest.approx(fe * w, rel=1e-9)
+    from astroARIADNE.plotter import _SIGMA_TOT_LABEL
+
+    def seg(c):          # the y bar: [(x, y - e), (x, y + e)]
+        segs = c.lines[2][-1].get_segments()
+        return np.asarray(segs[0], dtype=float) if segs else np.empty(0)
+
+    def bars(ax):
+        # (the legend's sample bars have no finite segment)
+        cs = [c for c in ax.containers if isinstance(c, ErrorbarContainer)
+              and seg(c).shape == (2, 2) and np.isfinite(seg(c)).all()]
+        half = [np.ptp(seg(c)[:, 1]) / 2 for c in cs]
+        dotted = [c.lines[2][-1].get_linestyle()[0][1] is not None
+                  for c in cs]
+        solid = [(h, c) for h, c, d in zip(half, cs, dotted) if not d]
+        tot = [(h, c) for h, c, d in zip(half, cs, dotted) if d]
+        return solid, tot
+
+    ax, ax_r = plt.gcf().axes[:2]
+    solid, tot = bars(ax)
+    assert len(solid) == len(tot) == len(p.wave)
+    for (h_o, c_o), (h_t, c_t), w, fe in zip(solid, tot, p.wave, p.flux_er):
+        assert h_o == pytest.approx(fe * w, rel=1e-9)
+        assert h_t >= fe * w * (1 - 1e-9)
+        if w < 0.2:      # UV bands: excess scatter fixed at zero
+            assert h_t == pytest.approx(fe * w, rel=1e-9)
+        assert len(c_o.lines[1]) > 0 and len(c_t.lines[1]) == 0   # caps
+        assert max(a.get_zorder() for a in c_o.lines[2]) > \
+            c_t.lines[2][0].get_zorder()
+    # residuals in units of sigma_tot: the total bar is +-1, the measurement
+    # error a fraction of it, and the unit is spelt out
+    solid_r, tot_r = bars(ax_r)
+    assert [h for h, _ in tot_r] == pytest.approx([1.0] * len(p.wave))
+    assert all(0 < h <= 1 + 1e-9 for h, _ in solid_r)
+    assert r'\sigma_{\rm tot}' in ax_r.get_ylabel()
+    assert _SIGMA_TOT_LABEL in [t.get_text() for t in ax_r.texts]
+    legend_text = [t.get_text() for lg in ax.get_children()
+                   if isinstance(lg, plt.matplotlib.legend.Legend)
+                   for t in lg.get_texts()]
+    assert r'$\pm\sigma_{\rm obs}$ (measured)' in legend_text
     # components in their own colours, the sum in black
     from matplotlib.colors import to_hex
     lines = {ln.get_label().split(':')[0]: to_hex(ln.get_color())

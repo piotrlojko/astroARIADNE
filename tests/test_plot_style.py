@@ -5,14 +5,16 @@ Every SEDPlotter plot is drawn under the fonts of ``plot_settings.dat``
 rcParams. SED points are coloured by band, and a legend beside the plot names
 the bands, bluest first.
 """
+import re
+
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.legend import Legend
 
-from astroARIADNE.config import filesdir
-from astroARIADNE.plotter import SEDPlotter, _grid_label
+from astroARIADNE.config import filesdir, filter_labels, filter_names
+from astroARIADNE.plotter import SEDPlotter, _grid_label, filter_label
 from astroARIADNE.star import Star
 
 MAGS = {'2MASS_Ks': (9.072, 0.023), 'GaiaDR2v2_BP': (9.112, 0.005),
@@ -78,7 +80,11 @@ def test_photometry_plot_has_filter_legend_and_stix_text(tmp_path):
     ax = plt.gcf().axes[0]
     legends = _legend_texts(ax)
     names = p.star.filter_names[p.star.filter_mask]
-    assert legends['Filter'] == list(names[np.argsort(p.wave)])
+    # bands in survey notation, bluest first
+    assert legends['Filter'] == [filter_labels[str(n)]
+                                 for n in names[np.argsort(p.wave)]]
+    assert legends['Filter'][:2] == [r'Gaia $G_{\rm BP}$', r'Gaia $G$']
+    assert legends['Filter'][-1] == r'2MASS $K_{\rm s}$'
     assert ax.xaxis.label.get_fontname() == 'STIXGeneral'
     assert ax.xaxis.label.get_fontproperties().get_math_fontfamily() \
         == 'stix'
@@ -124,3 +130,42 @@ def test_grid_labels():
     assert _grid_label('bosz+tlusty') == 'BOSZ + TLUSTY'
     assert _grid_label('btsettl') == 'BT-Settl'
     assert _grid_label('mygrid') == 'mygrid'
+
+
+def test_every_filter_has_a_plot_label():
+    assert set(filter_labels) == {str(f) for f in filter_names}
+    for f, lab in filter_labels.items():
+        # no stray underscores outside mathtext (subscripts live inside $..$)
+        outside = re.sub(r'\$[^$]*\$', '', lab)
+        assert '_' not in outside and '$' not in outside, f
+        assert lab.count('$') % 2 == 0, f
+
+
+def test_plot_labels_follow_the_surveys_notation():
+    lab = filter_labels
+    assert lab['GaiaDR2v2_RP'] == r'Gaia $G_{\rm RP}$'
+    assert lab['TYCHO_B_MvB'] == r'Tycho $B_T$'
+    assert lab['PS1_g'] == r'PS1 $g_{\rm P1}$'
+    assert lab['GROUND_COUSINS_I'] == r'Cousins $I_{\rm C}$'
+    assert lab['WISE_RSR_W1'] == 'WISE W1'
+    assert lab['SPITZER_IRAC_45'] == 'IRAC [4.5]'
+    assert lab['IUE_IUE.1250-1300'] == r'IUE 1250–1300 $\mathrm{\AA}$'
+    assert lab['TD1_WIDE.1565'] == r'TD-1 1565 $\mathrm{\AA}$'
+    assert lab['HST_WFC3_F160W'] == 'WFC3/IR F160W'
+    assert lab['HST_WFC3_F275W'] == 'WFC3/UVIS F275W'
+    assert lab['HST_ACS_WFC_F814W'] == 'ACS/WFC F814W'
+
+
+def test_plot_labels_render_in_the_plot_fonts(tmp_path):
+    p = _plotter(tmp_path)
+    with plt.rc_context(p._rc_params()):
+        fig = plt.figure()
+        for i, lab in enumerate(filter_labels.values()):
+            fig.text(0, i / len(filter_labels), lab)
+        fig.canvas.draw()          # raises on bad mathtext
+    plt.close(fig)
+
+
+def test_unknown_band_is_labelled_without_underscores():
+    assert filter_label('Generic_Bessell.V') == 'Generic Bessell.V'
+    assert filter_label(np.str_('2MASS_Ks')) == r'2MASS $K_{\rm s}$'

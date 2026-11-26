@@ -895,11 +895,18 @@ histograms of the fitted parameters and their distribution per model,
 highlighting the benefits of BMA.
 
 In both SED plots each observed point (circle) is coloured by its filter, and a
-legend beside the plot names the filters from the bluest to the reddest. The
+legend beside the plot names the filters from the bluest to the reddest, in
+each survey's own notation (Gaia $G_{\rm BP}$, 2MASS $K_{\rm s}$, Tycho $B_T$,
+WISE W1, IUE 1250–1300 Å, ...; the labels are `config.filter_labels`). The
 colours run from violet to red in wavelength order, spaced evenly by rank so
 that neighbouring bands stay distinguishable. In `SED.png` the open diamonds
 are the model's synthetic photometry; the legend above the filter list
-explains the markers and names the model curves (grid and Teff).
+explains the markers and names the model curves (grid and Teff). Each point
+carries its measurement error sigma_obs (solid, small caps) in front of the
+total uncertainty the fit used, sigma_tot = sqrt(sigma_obs^2 + s^2) with the
+fitted excess scatter s (dotted, no caps). The residual panel shows
+(observed - model) / sigma_tot, so there the dotted bars are +-1 and the solid
+ones sigma_obs / sigma_tot; the unit is written under the panel.
 
 Plots use STIXGeneral text and STIX math (matching LaTeX/Times documents). Fonts,
 sizes and colours come from `Datafiles/plot_settings.dat`; to change them pass
