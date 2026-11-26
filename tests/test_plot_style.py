@@ -46,7 +46,7 @@ def test_settings_file_without_new_keys_still_works(tmp_path):
     old = [l for l in open(filesdir + '/plot_settings.dat')
            if not l.startswith(('mathtext_fontset', 'legend_fontsize',
                                 'filter_cmap', 'corner_title_fontsize',
-                                'model_color_'))]
+                                'model_color_', 'model_component_'))]
     cfg = tmp_path / 'old_settings.dat'
     cfg.write_text(''.join(old))
     p = _plotter(tmp_path, settings=str(cfg))
@@ -54,17 +54,21 @@ def test_settings_file_without_new_keys_still_works(tmp_path):
             p.corner_title_fontsize) == ('stix', 16, 'turbo', 18)
     assert (p.model_color, p.model_color_primary,
             p.model_color_secondary) == ('black', '#1f4e79', '#c1432e')
+    assert p.model_component_alpha == 0.8
 
 
 def test_binary_component_colours_come_from_the_settings(tmp_path):
     p = _plotter(tmp_path)
     assert (p.model_color, p.model_color_primary,
             p.model_color_secondary) == ('black', '#1f4e79', '#c1432e')
+    assert p.model_component_alpha == 0.8
     cfg = tmp_path / 'mine.dat'
     cfg.write_text(open(filesdir + '/plot_settings.dat').read().replace(
-        'model_color_primary #1f4e79', 'model_color_primary tab:blue'))
-    assert _plotter(tmp_path, settings=str(cfg)).model_color_primary == \
-        'tab:blue'
+        'model_color_primary #1f4e79', 'model_color_primary tab:blue').replace(
+        'model_component_alpha 0.8', 'model_component_alpha 0.5'))
+    mine = _plotter(tmp_path, settings=str(cfg))
+    assert mine.model_color_primary == 'tab:blue'
+    assert mine.model_component_alpha == 0.5
 
 
 def test_photometry_plot_has_filter_legend_and_stix_text(tmp_path):

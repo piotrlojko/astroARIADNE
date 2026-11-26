@@ -627,9 +627,10 @@ class SEDPlotter:
             self.theta[:] = orig_theta
 
     def _binary_SED(self, ax):
-        """Model spectrum of a binary fit: each component (dashed / dotted,
-        in ``model_color_primary`` / ``model_color_secondary``) and their sum
-        (solid, ``model_color``), extincted and distance-scaled."""
+        """Model spectrum of a binary fit: each component (in
+        ``model_color_primary`` / ``model_color_secondary``, with opacity
+        ``model_component_alpha``) and their sum (``model_color``), all solid,
+        extincted and distance-scaled."""
         Rv = 3.1
         th = self.theta
         teff, logg, z, dist, rad, Av, teff2, logg2, rad2 = th[:9]
@@ -648,16 +649,17 @@ class SEDPlotter:
             wave, flux = sp
             flux = apply(self.av_law(wave * 1e4, Av, Rv), flux.copy())
             comps.append((wave, flux * (r / dist_sr) ** 2))
-        styles = (('--', self.model_color_primary,
+        styles = ((self.model_color_primary,
                    f'Primary: {_grid_label(self.grid)}, '
                    rf'$T_{{\rm eff}}$ = {teff:.0f} K'),
-                  (':', self.model_color_secondary,
+                  (self.model_color_secondary,
                    f'Secondary: {_grid_label(self.grid2)}, '
                    rf'$T_{{\rm eff}}$ = {teff2:.0f} K'))
-        for comp, (ls, col, lab) in zip(comps, styles):
+        for comp, (col, lab) in zip(comps, styles):
             if comp is not None:
                 w, f = comp
-                ax.plot(w, f * w, lw=1.2, ls=ls, color=col, zorder=0,
+                ax.plot(w, f * w, lw=1.2, ls='-', color=col,
+                        alpha=self.model_component_alpha, zorder=0,
                         label=lab)
         if all(c is not None for c in comps):
             (w1, f1), (w2, f2) = comps
@@ -2071,6 +2073,7 @@ class SEDPlotter:
         self.corner_title_fontsize = 18
         self.model_color_primary = '#1f4e79'
         self.model_color_secondary = '#c1432e'
+        self.model_component_alpha = 0.8
         if self.settings_dir is None:
             settings = open(filesdir + '/plot_settings.dat', 'r')
         else:

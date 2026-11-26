@@ -22,6 +22,7 @@ scatter_alpha 0.85
 model_color black
 model_color_primary #1f4e79
 model_color_secondary #c1432e
+model_component_alpha 0.8
 
 ### SED ERRORBARS
 error_color tab:blue

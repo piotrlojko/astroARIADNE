@@ -342,6 +342,11 @@ def test_end_to_end_binary_fit_and_plots(tmp_path, grids):
     assert lines['Primary'] == '#1f4e79'
     assert lines['Secondary'] == '#c1432e'
     assert lines['Sum'] == '#000000'
+    # all solid; the components at opacity 0.8
+    style = {ln.get_label().split(':')[0]: (ln.get_linestyle(), ln.get_alpha())
+             for ln in plt.gcf().axes[0].get_lines()}
+    assert style['Primary'] == style['Secondary'] == ('-', 0.8)
+    assert style['Sum'] == ('-', None)
     plt.close('all')
     p.plot_corner()
     assert (tmp_path / 'plots' / 'SED.png').exists()
