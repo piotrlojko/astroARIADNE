@@ -885,8 +885,8 @@ your own copy with `SEDPlotter(..., settings='my_settings.dat')`. The main keys
 are `fontname`, `mathtext_fontset`, `fontsize` (axis labels), `tick_labelsize`,
 `legend_fontsize`, `filter_cmap` (any matplotlib colormap), `model_color`
 (the model spectrum; for binaries the summed one), `model_color_primary` and
-`model_color_secondary` (a binary's components, by default `#112b42` and
-`#592615`), and `corner_fontsize` / `corner_title_fontsize` /
+`model_color_secondary` (a binary's components, by default `#1f4e79` and
+`#c1432e`), and `corner_fontsize` / `corner_title_fontsize` /
 `corner_tick_fontsize`. Settings
 apply only while SEDPlotter draws, so your own matplotlib settings are left
 alone.

@@ -326,8 +326,8 @@ def test_end_to_end_binary_fit_and_plots(tmp_path, grids):
     from matplotlib.colors import to_hex
     lines = {ln.get_label().split(':')[0]: to_hex(ln.get_color())
              for ln in plt.gcf().axes[0].get_lines()}
-    assert lines['Primary'] == '#112b42'
-    assert lines['Secondary'] == '#592615'
+    assert lines['Primary'] == '#1f4e79'
+    assert lines['Secondary'] == '#c1432e'
     assert lines['Sum'] == '#000000'
     plt.close('all')
     p.plot_corner()

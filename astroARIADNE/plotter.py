@@ -2066,8 +2066,8 @@ class SEDPlotter:
         self.legend_fontsize = 16
         self.filter_cmap = 'turbo'
         self.corner_title_fontsize = 18
-        self.model_color_primary = '#112b42'
-        self.model_color_secondary = '#592615'
+        self.model_color_primary = '#1f4e79'
+        self.model_color_secondary = '#c1432e'
         if self.settings_dir is None:
             settings = open(filesdir + '/plot_settings.dat', 'r')
         else:

@@ -53,16 +53,16 @@ def test_settings_file_without_new_keys_still_works(tmp_path):
     assert (p.mathtext_fontset, p.legend_fontsize, p.filter_cmap,
             p.corner_title_fontsize) == ('stix', 16, 'turbo', 18)
     assert (p.model_color, p.model_color_primary,
-            p.model_color_secondary) == ('black', '#112b42', '#592615')
+            p.model_color_secondary) == ('black', '#1f4e79', '#c1432e')
 
 
 def test_binary_component_colours_come_from_the_settings(tmp_path):
     p = _plotter(tmp_path)
     assert (p.model_color, p.model_color_primary,
-            p.model_color_secondary) == ('black', '#112b42', '#592615')
+            p.model_color_secondary) == ('black', '#1f4e79', '#c1432e')
     cfg = tmp_path / 'mine.dat'
     cfg.write_text(open(filesdir + '/plot_settings.dat').read().replace(
-        'model_color_primary #112b42', 'model_color_primary tab:blue'))
+        'model_color_primary #1f4e79', 'model_color_primary tab:blue'))
     assert _plotter(tmp_path, settings=str(cfg)).model_color_primary == \
         'tab:blue'
 

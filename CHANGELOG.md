@@ -69,7 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `('fixed', value)` warns that the default is used (it used to be replaced
   silently).
 - **Binary SED plots colour the components**: the primary's spectrum in
-  `#112b42` (dashed), the secondary's in `#592615` (dotted), the sum in
+  `#1f4e79` (dashed), the secondary's in `#c1432e` (dotted), the sum in
   black. Set with `model_color_primary`, `model_color_secondary` and
   `model_color` in `plot_settings.dat`.
 - **A BMA fit leaves out grids that lack a fitted band**, with a warning, and
