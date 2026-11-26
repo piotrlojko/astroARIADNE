@@ -153,7 +153,11 @@ likelihood). ARIADNE's defaults:
 - **distance** — the Bailer-Jones geometric distance posterior.
 - **radius / normalisation, $A_V$** — uniform, with $A_V$ capped at the
   line-of-sight galactic maximum.
-- **jitter $s_i$** — broad, weakly informative.
+- **jitter $s_i$** — broad, weakly informative: half-normal with a scale of
+  ten times the band's error. `prior_setup` can bound it instead with
+  `('uniform', low, up)` or `('truncnorm', mu, sigma, low, up)`, given in
+  magnitudes and converted to flux as
+  $s_{i,F} = s_{i,\mathrm{mag}} \ln 10\, F_i^{\mathrm{obs}} / 2.5$.
 
 Nested sampling draws from the prior by mapping a unit-cube variate $u\in[0,1]$
 through the inverse CDF (`prior_transform_dynesty`). ARIADNE substitutes

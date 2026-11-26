@@ -43,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   convolved from the same spectra. See `filters.md`.
 
 ### Changed
+- **Excess-scatter terms can be bounded.** `prior_setup` takes
+  `('uniform', low, up)` and `('truncnorm', mu, sigma, low, up)` for
+  `<band>_excess_scatter`, in magnitudes (as the outputs report the scatter);
+  they used to fall back to the default half-normal. Bad bounds stop the fit.
 - **SkyMapper photometry comes from DR4, band by band.** The librarian read
   SkyMapper DR2 and dropped all six bands when the row's single flag was set,
   so a bright star saturated in g, r and i lost its u, v and z too. It now
@@ -111,6 +115,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local editable isochrones.
 
 ### Fixed
+- **The excess scatter of the band after a fixed one was reported in the
+  wrong magnitudes.** The output converts each term's samples from flux to
+  magnitudes with its band's flux, but counted only the free terms, so after
+  a fixed term (e.g. `('fixed', 0)`) every later term used the previous
+  band's flux. With IUE 1250-1300 fixed and TD-1 1565 after it, TD-1's
+  scatter came out 15 % too large, in the outputs and in the SED plot's
+  error bars. The sampling was not affected; refit (or rerun with
+  `refit = True`) for correct outputs.
 - `fit_bma` never reused a `<grid>_out.pkl` written by an earlier run
   (`refit = False`): the fit signature recorded the extinction law as
   `str(function)`, which includes a memory address that changes from run to

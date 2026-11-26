@@ -11,6 +11,7 @@ import pytest
 
 import astroARIADNE.fitter as fitter_mod
 from astroARIADNE.fitter import Fitter
+from astroARIADNE.phot_utils import flux_to_mag
 from astroARIADNE.star import Star
 from astroARIADNE.utils import (excess_scatter_label, excess_scatter_name,
                                 get_band_tag, get_noise_name,
@@ -110,8 +111,75 @@ def test_term_of_a_band_not_fitted_is_skipped_with_a_warning(tmp_path):
 
 def test_unsupported_prior_type_falls_back_to_the_default(tmp_path):
     f = _fitter(tmp_path, dict(PRIORS, G_excess_scatter=('normal', 0, 1)))
-    with pytest.warns(UserWarning, match='take only "default"'):
+    with pytest.warns(UserWarning, match='take "default"'):
         f.initialize()
     i = list(fitter_mod.order).index('G_excess_scatter')
     assert f.coordinator[i] == 0
     assert f.priors['G_excess_scatter'].dist.name == 'truncnorm'
+
+
+def _band_flux(f, band):
+    names = list(f.star.filter_names[f.star.filter_mask])
+    return f.star.flux[f.star.filter_mask][names.index(band)]
+
+
+def test_uniform_bounds_are_given_in_magnitudes(tmp_path):
+    f = _fitter(tmp_path, dict(PRIORS, G_excess_scatter=('uniform', 0, 0.05),
+                               J_excess_scatter='default'))
+    f.initialize()
+    i = list(fitter_mod.order).index('G_excess_scatter')
+    assert f.coordinator[i] == 0
+    prior = f.priors['G_excess_scatter']
+    assert prior.dist.name == 'uniform'
+    lo, hi = prior.support()
+    flux = _band_flux(f, 'GaiaDR2v2_G')
+    assert lo == 0
+    # the flux bound is 0.05 mag, as the outputs report the scatter
+    assert flux_to_mag(flux, hi, 'GaiaDR2v2_G')[1] == pytest.approx(0.05)
+    # other bands keep the default half-normal
+    assert f.priors['J_excess_scatter'].dist.name == 'truncnorm'
+    assert 'G_excess_scatter\tuniform\t0\t0.05\tmag' in \
+        (tmp_path / 'prior.dat').read_text()
+
+
+def test_truncnorm_bounds_are_given_in_magnitudes(tmp_path):
+    f = _fitter(tmp_path, dict(
+        PRIORS, W1_excess_scatter=('truncnorm', 0, 0.05, 0, 0.2)))
+    f.initialize()
+    prior = f.priors['W1_excess_scatter']
+    flux = _band_flux(f, 'WISE_RSR_W1')
+    lo, hi = prior.support()
+    assert lo == pytest.approx(0)
+    assert flux_to_mag(flux, hi, 'WISE_RSR_W1')[1] == pytest.approx(0.2)
+    # half-normal shape: median 0.674 sigma (well inside the bound)
+    assert flux_to_mag(flux, prior.ppf(0.5), 'WISE_RSR_W1')[1] == \
+        pytest.approx(0.05 * 0.6745, rel=0.02)
+
+
+@pytest.mark.parametrize('spec', [
+    ('uniform', 0.1, 0.05), ('uniform', -0.1, 0.1), ('uniform', 0.1),
+    ('truncnorm', 0, 0, 0, 0.1), ('truncnorm', 0, 0.05, 0.2, 0.1)])
+def test_bad_scatter_bounds_stop_the_fit(tmp_path, spec):
+    f = _fitter(tmp_path, dict(PRIORS, G_excess_scatter=spec))
+    with pytest.raises(SystemExit):
+        f.initialize()
+
+
+def test_reported_scatter_belongs_to_its_band_after_a_fixed_term(tmp_path):
+    # BP's term is fixed, so it has no samples; the bands after it must still
+    # be converted to magnitudes with their own flux, so each one's samples
+    # stay inside its own bound.
+    import pickle
+    f = _fitter(tmp_path, dict(PRIORS, BP_excess_scatter=('fixed', 0),
+                               J_excess_scatter=('uniform', 0, 0.02),
+                               W1_excess_scatter=('uniform', 0, 0.05)))
+    f.setup = ['dynesty', 40, 5.0, 'multi', 'rwalk', 1, False]
+    f.initialize()
+    f.fit()
+    with open(tmp_path / 'phoenix_out.pkl', 'rb') as fh:
+        ps = pickle.load(fh)['posterior_samples']
+    for k, cap in (('J_excess_scatter', 0.02), ('W1_excess_scatter', 0.05)):
+        s = np.asarray(ps[k])
+        assert s.min() >= 0 and s.max() <= cap * (1 + 1e-9), k
+        assert s.max() > 0.5 * cap, k      # the samples do fill the range
+    assert ps['BP_excess_scatter'] == 0

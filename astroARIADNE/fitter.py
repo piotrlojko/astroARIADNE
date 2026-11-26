@@ -203,9 +203,12 @@ def _check_excess_scatter_setup(prior_setup, scatter):
 
     ``scatter`` lists the excess-scatter terms of the fitted bands. A term of
     a band that is not fitted (e.g. one a catalogue no longer returns) is
-    skipped with a warning. Only ``'default'`` and ``('fixed', value)`` apply
-    to these terms; any other prior is replaced by the default, with a
-    warning.
+    skipped with a warning. These terms take ``'default'``,
+    ``('fixed', value)`` (a flux, like the band's error), or a bounded prior
+    in magnitudes, as the outputs report the scatter: ``('uniform', low,
+    up)`` or ``('truncnorm', mu, sigma, low, up)`` with ``0 <= low < up``.
+    Any other prior is replaced by the default, with a warning; bad bounds
+    raise ``InputError``.
     """
     keys = []
     for k, v in prior_setup.items():
@@ -216,12 +219,26 @@ def _check_excess_scatter_setup(prior_setup, scatter):
                     f'fitted band; ignoring it. Fitted bands: '
                     f'{", ".join(scatter)}.', UserWarning, stacklevel=3)
                 continue
-            if v != 'default' and (isinstance(v, str) or v[0] != 'fixed'):
+            kind = v if isinstance(v, str) else v[0]
+            if kind not in ('default', 'fixed', 'uniform', 'truncnorm'):
                 warnings.warn(
-                    f'prior_setup: excess-scatter terms take only "default" '
-                    f'or ("fixed", value); using the default prior for '
-                    f'{k!r} instead of {v!r}.', UserWarning, stacklevel=3)
+                    f'prior_setup: excess-scatter terms take "default", '
+                    f'("fixed", value), ("uniform", low, up) or ("truncnorm", '
+                    f'mu, sigma, low, up); using the default prior for {k!r} '
+                    f'instead of {v!r}.', UserWarning, stacklevel=3)
                 continue
+            if kind in ('uniform', 'truncnorm'):
+                n = 3 if kind == 'uniform' else 5
+                ok = len(v) == n
+                if ok:
+                    low, up = v[n - 2], v[n - 1]
+                    ok = 0 <= low < up and (kind == 'uniform' or v[2] > 0)
+                if not ok:
+                    InputError(
+                        f'prior_setup: {k!r} = {v!r}: excess-scatter priors '
+                        f'are ("uniform", low, up) or ("truncnorm", mu, '
+                        f'sigma, low, up) in magnitudes, with 0 <= low < up '
+                        f'and sigma > 0.').__raise__()
         keys.append(k)
     return keys
 
@@ -1248,6 +1265,10 @@ class Fitter:
         scatter = [excess_scatter_name(filt)
                    for filt in self.star.filter_names[mask]]
         keys = _check_excess_scatter_setup(self.prior_setup, scatter)
+        # Observed flux of each excess-scatter term's band, for bounds given
+        # in magnitudes; terms with such a prior skip the default below.
+        scatter_flux = dict(zip(scatter, self.star.flux[mask]))
+        user_scatter = set()
         prior_out = 'Parameter\tPrior\tValues\n'
         if 'norm' in keys and ('rad' in keys or 'dist' in keys):
             er = PriorError('rad or dist', 1)
@@ -1272,6 +1293,17 @@ class Fitter:
 
             else:
                 prior = self.prior_setup[k][0]
+                spec = self.prior_setup[k]
+                unit = ''
+                if is_excess_scatter(k) and prior in ('uniform', 'truncnorm'):
+                    # Given in magnitudes, as the outputs report the scatter;
+                    # the fit adds it to the band's flux error, so it is
+                    # sampled in flux: s_F = s_mag ln(10) F / 2.5.
+                    to_flux = np.log(10) / 2.5 * scatter_flux[k]
+                    spec = (prior,) + tuple(float(x) * to_flux
+                                            for x in spec[1:])
+                    user_scatter.add(k)
+                    unit = '\tmag'
                 if prior == 'fixed':
                     value = self.prior_setup[k][1]
                     idx = np.where(k == order)[0]
@@ -1288,26 +1320,24 @@ class Fitter:
                     if hasattr(self, 'prior_sources'):
                         self.prior_sources[k] = 'user_normal'
                 if prior == 'truncnorm':
-                    mu = self.prior_setup[k][1]
-                    sig = self.prior_setup[k][2]
-                    low = self.prior_setup[k][3]
-                    up = self.prior_setup[k][4]
+                    mu, sig, low, up = spec[1:5]
                     b, a = (up - mu) / sig, (low - mu) / sig
                     prior_dict[k] = st.truncnorm(a=a, b=b, loc=mu, scale=sig)
                     prior_out += k
-                    prior_out += '\ttruncatednormal\t{}\t{}\t{}\t{}\n'.format(
-                        mu, sig, low, up)
+                    prior_out += '\ttruncatednormal\t{}\t{}\t{}\t{}{}\n'.format(
+                        *self.prior_setup[k][1:5], unit)
                     if hasattr(self, 'prior_sources'):
                         self.prior_sources[k] = 'user_truncnorm'
                 if prior == 'uniform':
-                    low = self.prior_setup[k][1]
-                    up = self.prior_setup[k][2]
+                    low, up = spec[1:3]
                     prior_dict[k] = st.uniform(loc=low, scale=up - low)
-                    prior_out += k + '\tuniform\t{}\t{}\n'.format(low, up)
+                    prior_out += k + '\tuniform\t{}\t{}{}\n'.format(
+                        *self.prior_setup[k][1:3], unit)
                     if hasattr(self, 'prior_sources'):
                         self.prior_sources[k] = 'user_uniform'
         for par in scatter:
-            prior_dict[par] = self.default_priors[par]
+            if par not in user_scatter:
+                prior_dict[par] = self.default_priors[par]
         # A binary's secondary parameters missing from prior_setup take their
         # defaults (see _default_priors).
         if self._binary:
@@ -1750,16 +1780,18 @@ class Fitter:
         # Create raw samples holder
 
         out['posterior_samples'] = dict()
+        # Band (and its flux) of each excess-scatter term, by name: a fixed
+        # term has no samples, so counting the free ones would pair every
+        # later term with the wrong band.
+        band_of = {excess_scatter_name(f): (f, fl) for f, fl in
+                   zip(self.star.filter_names[mask], self.star.flux[mask])}
         j = 0
-        k = 0  # filter counter
         for i, param in enumerate(order):
             if not self.coordinator[i]:
                 samples = posterior_samples[:, j]
                 if is_excess_scatter(param):
-                    filt = self.star.filter_names[mask][k]
-                    flx = self.star.flux[mask][k]
+                    filt, flx = band_of[param]
                     _, samples = flux_to_mag(flx, samples, filt)
-                    k += 1
                 out['posterior_samples'][param] = samples
                 j += 1
             else:
