@@ -2,6 +2,17 @@ import pytest
 import requests
 
 
+@pytest.fixture(autouse=True, scope='session')
+def _band_extinction_tables_in_tmp(tmp_path_factory):
+    """Build band-extinction tables in a temporary directory, not in the
+    user's ``~/.cache``. Tests that check the saving set their own."""
+    mp = pytest.MonkeyPatch()
+    mp.setenv('ARIADNE_BAND_EXTINCTION_DIR',
+              str(tmp_path_factory.mktemp('band_extinction')))
+    yield
+    mp.undo()
+
+
 @pytest.fixture(autouse=True)
 def _no_live_cds_fallback(monkeypatch):
     """Keep the CDS failover offline in tests.

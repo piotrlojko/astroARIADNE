@@ -69,15 +69,25 @@ def test_residuals_start_after_the_secondary(grids):
 def test_contrast_is_m2_minus_m1_and_independent_of_distance(grids):
     p = grids['phoenix']
     cf = np.array(['GaiaDR2v2_G', '2MASS_Ks'])
-    dm = contrast_model(THETA, p, cf)
+    dm = contrast_model(THETA, p, cf, LAW)
     m1, m2 = binary_components(THETA, BANDS, WAVE, p, LAW)
     j = [list(BANDS).index(b) for b in cf]
     np.testing.assert_allclose(dm, -2.5 * np.log10(m2[j] / m1[j]), rtol=1e-10)
     assert np.all(dm > 0)                      # the K dwarf is fainter
     far = THETA.copy()
-    far[3], far[5] = 900., 1.5
-    np.testing.assert_allclose(contrast_model(far, p, cf), dm, rtol=1e-12)
-    assert contrast_loglike(THETA, p, (cf, dm, np.ones(2))) == 0
+    far[3] = 900.
+    np.testing.assert_allclose(contrast_model(far, p, cf, LAW), dm,
+                               rtol=1e-12)
+    # Extinction integrated over a band depends on the spectrum, so in the
+    # wide G band the 6000 K and 4200 K stars are reddened differently (A_G /
+    # A_V is known to fall with colour), in Ks hardly; without the law (or
+    # with band_extinction off) A_V cancels exactly.
+    far[5] = 1.5
+    shift = contrast_model(far, p, cf, LAW) - dm
+    assert 0.05 < abs(shift[0]) < 0.3 and abs(shift[1]) < 0.01
+    np.testing.assert_allclose(contrast_model(far, p, cf),
+                               contrast_model(THETA, p, cf), rtol=1e-12)
+    assert contrast_loglike(THETA, p, (cf, dm, np.ones(2)), LAW) == 0
 
 
 def test_likelihood_adds_the_contrast_term(grids):
@@ -88,7 +98,7 @@ def test_likelihood_adds_the_contrast_term(grids):
     base = log_likelihood(th, flux, err, WAVE, BANDS, p, False, LAW,
                           binary=True)
     cf = np.array(['GaiaDR2v2_G'])
-    dm = contrast_model(THETA, p, cf)
+    dm = contrast_model(THETA, p, cf, LAW)
     c = (cf, dm + 0.2, np.array([0.1]))
     with_c = log_likelihood(th, flux, err, WAVE, BANDS, p, False, LAW,
                             binary=True, contrast=c)
@@ -290,6 +300,7 @@ def test_end_to_end_binary_fit_and_plots(tmp_path, grids):
     with open(pk, 'rb') as fh:
         out = pickle.load(fh)
     assert out['binary'] is True and out['model_grid'] == 'bosz+tlusty'
+    assert out['band_extinction'] is True
     ps = out['posterior_samples']
     for k in ('teff2', 'logg2', 'rad2', 'lum2', 'grav_mass2', 'AD2',
               'frac2_IUE_IUE.1250-1300'):
@@ -305,6 +316,8 @@ def test_end_to_end_binary_fit_and_plots(tmp_path, grids):
     from astroARIADNE.plotter import SEDPlotter
     p = SEDPlotter(str(pk), str(tmp_path / 'plots'), pdf=False)
     assert p.binary and (p.grid, p.grid2) == ('bosz', 'tlusty')
+    # the plot's model fluxes are reddened as the fit's were
+    assert all(it.band_extinction for it in p.interpolator)
     i = int(np.argmax(ps['loglike']))
     assert p.theta[6] == ps['teff2'][i]          # max-likelihood sample
     p.plot_SED()
@@ -342,10 +355,13 @@ def test_end_to_end_binary_fit_and_plots(tmp_path, grids):
                      else k): _legacy(v) for k, v in d.items()}
         return d
     old = tmp_path / 'old_out.pkl'
+    legacy = _legacy(out)
+    del legacy['band_extinction']     # nor did it have band extinction
     with open(old, 'wb') as fh:
-        pickle.dump(_legacy(out), fh)
+        pickle.dump(legacy, fh)
     po = SEDPlotter(str(old), str(tmp_path / 'plots_old'), pdf=False)
     assert 'G_excess_scatter' in po.order
+    assert not any(it.band_extinction for it in po.interpolator)
     assert not any(k.endswith('_noise') for k in po.out['posterior_samples'])
     po.plot_SED()
     plt.close('all')

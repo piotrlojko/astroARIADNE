@@ -221,10 +221,13 @@ class SEDPlotter:
             for filt, flx, flx_e in zip(filters, flxs, errs):
                 self.order = np.append(self.order, excess_scatter_name(filt))
 
-            self.interpolator = load_band_grid(self.grid)
+            # Model fluxes as the fit computed them: outputs from before
+            # band-integrated extinction used the central-wavelength one.
+            band_ext = bool(out.get('band_extinction', False))
+            self.interpolator = load_band_grid(self.grid, band_ext)
             if self.binary:
                 self.interpolator = (self.interpolator,
-                                     load_band_grid(self.grid2))
+                                     load_band_grid(self.grid2, band_ext))
 
             # Get best fit parameters. A single-grid fit has no BMA
             # 'samples' summary; its one summary serves both methods.

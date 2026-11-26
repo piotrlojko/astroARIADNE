@@ -47,28 +47,54 @@ Three physical effects turn the surface flux into the flux received at Earth:
    angle $\propto (R/d)^2$, so the received flux scales by $(R/d)^2$.
 2. **Interstellar extinction.** Dust attenuates the flux by
    $10^{-0.4\,A(\lambda)}$. ARIADNE uses a fixed reddening law with
-   $R_V = 3.1$, parameterised by the $V$-band extinction $A_V$. Because the law
-   is linear in $A_V$ at fixed $R_V$, the per-band attenuation curve is computed
-   once at $A_V = 1$ and raised to the power $A_V$ inside `model_grid`.
-3. **Filter integration**, already baked into the grid.
+   $R_V = 3.1$, parameterised by the $V$-band extinction $A_V$:
+   $A(\lambda) = A_V\, a(\lambda)$.
+3. **Filter integration**, baked into the grid for the unreddened spectrum.
 
+Extinction and filter integration do not commute: the observed band flux is
+the band average of the *reddened* spectrum, $\langle F\,10^{-0.4 A_V a}
+\rangle_i$, not the unreddened band flux $f_i = \langle F \rangle_i$ times the
+attenuation at the band's central wavelength $\lambda_i$. Over a wide band
+$a(\lambda)$ changes a lot (in Gaia $G$ from about 1.6 at 0.4 µm to 0.5 at
+1 µm), and the blue side, where a hot star is brightest, is the most dimmed.
 The model band flux is therefore (`model_grid`)
 
 $$
 F_i^{\mathrm{model}} =
   \left(\frac{R}{d}\right)^{2}
   f_i(T_{\mathrm{eff}}, \log g, [\mathrm{Fe/H}])\;
-  10^{-0.4\, A_V\, k_i},
+  10^{-0.4\,[A_V\, k_i + \Delta A_i]},
 \qquad
 k_i \equiv \frac{A(\lambda_i)}{A_V},
 $$
 
+$$
+\Delta A_i(T_{\mathrm{eff}}, \log g, [\mathrm{Fe/H}], A_V) =
+  -2.5\log_{10}\frac{\langle F\,10^{-0.4 A_V a}\rangle_i}{\langle F\rangle_i}
+  - A_V\, k_i ,
+$$
+
 with $R$ and $d$ both in solar radii (the distance is converted from parsecs
-internally). In **normalisation mode** (`use_norm=True`) the degenerate factor
+internally). $A_V k_i$ is the central-wavelength extinction (computed once at
+$A_V = 1$ per band, since the law is linear in $A_V$); $\Delta A_i$ corrects
+it to the extinction integrated over the band. It depends on the spectrum and
+on $A_V$, so the `band_extinction` module tabulates it, with its derivative in
+$A_V$, for every grid node and band at 14 values of $A_V$ from 0 to 30, by
+synthetic photometry of the cached node spectra. The fit interpolates
+$\Delta A_i$ trilinearly in $(\log g, T_{\mathrm{eff}}, [\mathrm{Fe/H}])$, like
+$f_i$, and with cubic Hermite polynomials in $A_V$ (error below 0.05 mmag for
+$A_V < 3$). At $A_V \approx 0.4$, $\Delta A_i$ is about 0.07 mag in $G$ for an
+11 000 K star and $-0.3$ mag in GALEX NUV for a 2300 K one (its central
+wavelength sits on the 2175 Å bump). Bands the cached spectra do not span (e.g.
+WISE W2 and redder, where extinction is negligible) and grids without cached
+spectra take $\Delta A_i = 0$, as does `Fitter.band_extinction = False` (the
+behaviour of ARIADNE 1.6 and earlier).
+
+In **normalisation mode** (`use_norm=True`) the degenerate factor
 $(R/d)^2$ is replaced by a single free scale $N$:
-$F_i^{\mathrm{model}} = N\, f_i\, 10^{-0.4 A_V k_i}$. This is the right choice
-when no reliable parallax is available, at the cost of not constraining $R$ and
-$d$ separately.
+$F_i^{\mathrm{model}} = N\, f_i\, 10^{-0.4 [A_V k_i + \Delta A_i]}$. This is
+the right choice when no reliable parallax is available, at the cost of not
+constraining $R$ and $d$ separately.
 
 ### Parameters
 

@@ -696,6 +696,21 @@ We allow the use of four different extinction laws:
 - odonnell
 - calzetti
 
+**Extinction over the band.** By default (`f.band_extinction = True`) each
+band's model flux is reddened with the extinction integrated over the band,
+not the extinction at its central wavelength. Over a wide band the two differ:
+at A_V ~ 0.4 by about 7 % in Gaia G for a late-B star, and by tenths of a
+magnitude in GALEX NUV. The correction is tabulated per grid node, band and
+A_V from the spectra cache the first time a grid and band are fitted (a few
+seconds), and saved in `~/.cache/astroARIADNE/band_extinction` (or
+`$ARIADNE_BAND_EXTINCTION_DIR`). Without the spectra cache, and for bands it
+does not span (WISE W2 and redder) or grids it lacks (SPHINX), the
+central-wavelength extinction is used, as it is for predictions in
+`synthetic_filters` that are not ARIADNE bands. `f.band_extinction = False`
+reproduces ARIADNE 1.6 and earlier. Fits made with the other setting are not reused
+(`refit`), and `SEDPlotter` draws each output's model the way it was fitted.
+See [theory.md](docs/theory.md#the-forward-model).
+
 The next step is setting up the priors to use:
 
 ```python

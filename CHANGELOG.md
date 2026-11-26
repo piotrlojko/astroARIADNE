@@ -43,6 +43,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   convolved from the same spectra. See `filters.md`.
 
 ### Changed
+- **Extinction is integrated over each band.** Model band fluxes used to be
+  reddened with the extinction at the band's central wavelength. Over a wide
+  band the extinction changes with wavelength, so that misstated the reddened
+  flux: at A_V ~ 0.4 by about 7 % in Gaia G, 2-3 % in BP and TESS and 1-2 % in
+  RP and Tycho V for a late-B star, and by tenths of a magnitude in GALEX NUV,
+  whose central wavelength sits on the 2175 A bump. The new `band_extinction`
+  module tabulates the correction for every grid node, band and A_V (0-30,
+  cubic Hermite in between, < 0.05 mmag error below A_V = 3) by synthetic
+  photometry of the spectra-cache node spectra, and `model_grid`,
+  `binary_components` (each component its own) and `contrast_model` apply it.
+  Tables are built the first time a grid and band are fitted (seconds) and
+  saved in `~/.cache/astroARIADNE/band_extinction`
+  (`$ARIADNE_BAND_EXTINCTION_DIR`). Bands the cached spectra do not span (WISE
+  W2 and redder), grids without cached spectra (SPHINX), installations
+  without the spectra cache and `synthetic_filters` predictions in filters
+  that are not ARIADNE bands keep the central-wavelength extinction.
+  `Fitter.band_extinction = False` restores the old behaviour. Fitted values
+  change for stars with non-negligible extinction; outputs record the setting
+  (`band_extinction`), `fit_bma` refits outputs made with the other setting,
+  and `SEDPlotter` draws each output's model as it was fitted.
 - **Plot style.** All plots use STIXGeneral text and STIX mathtext, set by
   `plot_settings.dat` (new keys `mathtext_fontset`, `legend_fontsize`,
   `filter_cmap`, `corner_title_fontsize`; older settings files still work) and

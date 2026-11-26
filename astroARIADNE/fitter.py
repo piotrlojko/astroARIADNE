@@ -360,6 +360,7 @@ class Fitter:
     _interpolator2 = None
     _bma_models2 = None
     contrast = None
+    _band_extinction = True
 
     def __init__(self):
 
@@ -398,6 +399,8 @@ class Fitter:
         # Re-fit every BMA grid even when a compatible ``<grid>_out.pkl``
         # already exists in ``out_folder`` (see ``refit``).
         self._refit = False
+        # Extinction integrated over each band (see ``band_extinction``).
+        self._band_extinction = True
         # Evidence tolerance for the MIST isochrone age/mass nested sampling
         # (the dominant cost of a BMA run). Lower is more precise but slower;
         # the isochrone fit itself is parallelised across ``threads``.
@@ -590,6 +593,41 @@ class Fitter:
     def refit(self, refit):
         self._refit = bool(refit)
 
+    @property
+    def band_extinction(self):
+        """Redden each band's model flux with the extinction integrated over
+        the band (``True``, default) rather than the extinction at the band's
+        central wavelength (``False``, as in ARIADNE 1.6 and earlier).
+
+        Over a wide band the extinction changes with wavelength, so the
+        central-wavelength value misstates the reddened flux by several per
+        cent in Gaia G, BP/RP or TESS at A_V ~ 0.4, and by more in GALEX NUV.
+        Uses tables built from the spectra cache (see ``band_extinction``
+        module); bands and grids it does not cover keep the
+        central-wavelength extinction.
+        """
+        return self._band_extinction
+
+    @band_extinction.setter
+    def band_extinction(self, on):
+        self._band_extinction = bool(on)
+
+    def _prepare_band_extinction(self, filts):
+        """Apply the ``band_extinction`` setting to the grid(s) being fitted
+        and build their tables now, so forked sampler workers inherit them
+        instead of each building its own."""
+        intps = (interpolator if isinstance(interpolator, (tuple, list))
+                 else (interpolator,))
+        set_band_extinction(intps, self._band_extinction)
+        if not self._band_extinction:
+            return
+        bands = [filts]
+        if binary and contrast is not None and not isinstance(contrast, list):
+            bands.append(contrast[0])
+        for it in intps:
+            for b in bands:
+                prepare_band_extinction(it, b, av_law)
+
     def _fit_signature(self):
         """Everything besides the photometry that shapes a grid's posterior:
         priors, sampler setup, extinction law and the pinned parameters.
@@ -656,6 +694,11 @@ class Fitter:
         if bool(prev_norm) != bool(self.norm):
             return ('fit parameters changed (norm vs dist/rad) since the '
                     'previous fit')
+        # Outputs from before band-integrated extinction used the
+        # central-wavelength extinction.
+        if bool(prev.get('band_extinction', False)) != self._band_extinction:
+            return ('extinction over the bands changed (band_extinction) '
+                    'since the previous fit')
         return None
 
     @property
@@ -1570,6 +1613,7 @@ class Fitter:
         flux_er = star.flux_er[mask]
         filts = star.filter_names[mask]
         wave = star.wave[mask]
+        self._prepare_band_extinction(filts)
         if pymultinest is None:
             raise ImportError(
                 'pymultinest/libmultinest could not be loaded: build MultiNest '
@@ -1604,6 +1648,7 @@ class Fitter:
         flux_er = star.flux_er[mask]
         filts = star.filter_names[mask]
         wave = star.wave[mask]
+        self._prepare_band_extinction(filts)
         if self._dynamic:
             if self._threads > 1:
                 with Pool(self._threads) as executor:
@@ -1884,6 +1929,7 @@ class Fitter:
         out['norm'] = self.norm
         out['model_grid'] = self._out_name()
         out['av_law'] = av_law
+        out['band_extinction'] = self._band_extinction
         out['binary'] = bool(binary)
         out['contrast'] = list(self.contrast or []) if binary else []
         if not self.bma:
@@ -1980,6 +2026,7 @@ class Fitter:
         use_norm = self.norm
         av_law = self._av_law
         intp = self.load_interpolator('btsettl')
+        set_band_extinction(intp, self._band_extinction)
         # Only the bands BT-Settl models: it lacks e.g. the IUE / TD-1 bands,
         # and asking for those raised KeyError, which skipped the whole step.
         names = [str(f) for f in filter_names if str(f) in intp.column_index]
@@ -1991,6 +2038,7 @@ class Fitter:
         fl = np.array([model_grid(th, band_arr, wave, intp, use_norm, av_law,
                                   binary=self._binary)
                        for th in thetas])                 # (ndraws, nbands)
+        forget_interpolator(intp)   # its tables span every band: free them
         observed = {str(b) for b in
                     self.star.filter_names[self.star.used_filters == 1]}
         photom = {}
@@ -2420,6 +2468,7 @@ class Fitter:
         out['norm'] = self.norm
         out['engine'] = 'Bayesian Model Averaging'
         out['av_law'] = av_law
+        out['band_extinction'] = self._band_extinction
         out['binary'] = bool(binary)
         out['contrast'] = list(self.contrast or []) if binary else []
 

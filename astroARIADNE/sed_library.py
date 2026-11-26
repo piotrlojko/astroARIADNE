@@ -16,6 +16,7 @@ _ORDER_CACHE = {}
 _EXT_CACHE = {}
 _TRANSFORM_CACHE = {}
 _GRID_CACHE = {}
+_BAND_EXT_CACHE = {}
 
 
 @nb.njit(cache=True, nogil=True)
@@ -109,6 +110,148 @@ def _trilinear3d(x0, x1, x2, ii0, ii1, ii2, cube):
         for k in range(nf):
             out[k] += cube[j0, j1, j2, k] * w
     return out
+
+
+@nb.njit(cache=True, nogil=True)
+def _bracket(ii, x):
+    """Lower node index and fractional position of ``x`` on axis ``ii``, as
+    in ``_trilinear3d`` (an exact node hit gives that node and 0)."""
+    l, eq = _searchsorted(ii, x)
+    if eq:
+        return l, 0.0
+    i = l - 1
+    return i, (x - ii[i]) / (ii[l] - ii[i])
+
+
+@nb.njit(cache=True, nogil=True)
+def _band_ext_factor(x0, x1, x2, av, ii0, ii1, ii2, avn, cube):
+    """``10**(-0.4 dA)`` per band from a band-extinction table.
+
+    ``cube[n0, n1, n2, band, i_av, 0]`` is dA at extinction ``avn[i_av]`` and
+    ``[..., 1]`` its derivative in A_V (see ``band_extinction``). Trilinear in
+    the grid axes like ``_trilinear3d``; cubic Hermite in A_V between the
+    nodes, linear beyond them. Returns ones where the grid lookup is out of
+    bounds or NaN, where the band flux itself is NaN.
+    """
+    nbands = cube.shape[3]
+    out = np.ones(nbands)
+    n0 = ii0.shape[0]
+    n1 = ii1.shape[0]
+    n2 = ii2.shape[0]
+    nav = avn.shape[0]
+    if (x0 != x0 or x1 != x1 or x2 != x2 or av != av
+            or x0 < ii0[0] or x0 > ii0[n0 - 1]
+            or x1 < ii1[0] or x1 > ii1[n1 - 1]
+            or x2 < ii2[0] or x2 > ii2[n2 - 1]):
+        return out
+    i0, y0 = _bracket(ii0, x0)
+    i1, y1 = _bracket(ii1, x1)
+    i2, y2 = _bracket(ii2, x2)
+    hermite = False
+    j = 0
+    dt = 0.0
+    h00 = h10 = h01 = h11 = 0.0
+    if av <= avn[0]:
+        j = 0
+        dt = av - avn[0]
+    elif av >= avn[nav - 1]:
+        j = nav - 1
+        dt = av - avn[nav - 1]
+    else:
+        j, t = _bracket(avn, av)
+        if j >= nav - 1:          # exact hit on the last node
+            j = nav - 1
+            dt = 0.0
+        else:
+            hermite = True
+            h = avn[j + 1] - avn[j]
+            t2 = t * t
+            t3 = t2 * t
+            h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+            h10 = (t3 - 2.0 * t2 + t) * h
+            h01 = -2.0 * t3 + 3.0 * t2
+            h11 = (t3 - t2) * h
+    acc = np.zeros(nbands)
+    for e in range(8):
+        d0 = (e >> 2) & 1
+        d1 = (e >> 1) & 1
+        d2 = e & 1
+        w = (y0 if d0 else 1.0 - y0) \
+            * (y1 if d1 else 1.0 - y1) \
+            * (y2 if d2 else 1.0 - y2)
+        if w == 0.0:
+            continue
+        j0 = i0 + d0 if i0 + d0 < n0 else n0 - 1
+        j1 = i1 + d1 if i1 + d1 < n1 else n1 - 1
+        j2 = i2 + d2 if i2 + d2 < n2 else n2 - 1
+        for k in range(nbands):
+            if hermite:
+                v = (h00 * cube[j0, j1, j2, k, j, 0]
+                     + h10 * cube[j0, j1, j2, k, j, 1]
+                     + h01 * cube[j0, j1, j2, k, j + 1, 0]
+                     + h11 * cube[j0, j1, j2, k, j + 1, 1])
+            else:
+                v = cube[j0, j1, j2, k, j, 0] + dt * cube[j0, j1, j2, k, j, 1]
+            acc[k] += w * v
+    for k in range(nbands):
+        out[k] = 10.0 ** (-0.4 * acc[k])
+    return out
+
+
+def _band_ext_arrays(interp, filts, av_law):
+    """Band-extinction table of ``interp`` for ``filts`` (see
+    ``band_extinction.interpolator_table``), or None when ``interp`` has it
+    switched off (``band_extinction`` attribute, set by ``load_band_grid``)
+    or none can be built. Memoised on object identity like
+    ``_grid_arrays``."""
+    on = getattr(interp, 'band_extinction', False)
+    if not on:
+        return None
+    key = (id(interp), id(filts), id(av_law))
+    cached = _BAND_EXT_CACHE.get(key)
+    if (cached is not None and cached[0] is interp and cached[1] is filts
+            and cached[2] is av_law):
+        return cached[3]
+    from .band_extinction import interpolator_table
+    arrays = interpolator_table(interp, filts, av_law)
+    if len(_BAND_EXT_CACHE) >= 32:
+        _BAND_EXT_CACHE.pop(next(iter(_BAND_EXT_CACHE)))
+    _BAND_EXT_CACHE[key] = (interp, filts, av_law, arrays)
+    return arrays
+
+
+def prepare_band_extinction(interp, filts, av_law):
+    """Load or build the band-extinction table of ``interp`` for ``filts``
+    now (e.g. before forking sampler workers). True if one is in use."""
+    return _band_ext_arrays(interp, filts, av_law) is not None
+
+
+def band_extinction_factor(teff, logg, z, Av, filts, interp, av_law):
+    """Correction from central-wavelength to band-integrated extinction:
+    ``10**(-0.4 dA)`` per band of ``filts`` (1 where not tabulated)."""
+    arrays = _band_ext_arrays(interp, filts, av_law)
+    if arrays is None:
+        return 1.0
+    ii0, ii1, ii2, avn, cube = arrays
+    return _band_ext_factor(logg, teff, z, Av, ii0, ii1, ii2, avn, cube)
+
+
+def forget_interpolator(interp):
+    """Drop the memoised arrays of ``interp`` (sliced flux cubes and
+    band-extinction tables), so a temporary interpolator can be freed."""
+    for cache in (_GRID_CACHE, _BAND_EXT_CACHE):
+        for k in [k for k, v in cache.items() if v[0] is interp]:
+            del cache[k]
+    interp.__dict__.pop('_band_extinction_tables', None)
+
+
+def set_band_extinction(interpolators, on):
+    """Switch band-integrated extinction on or off for band-grid
+    interpolator(s) (a single one or a binary pair)."""
+    its = (interpolators if isinstance(interpolators, (tuple, list))
+           else (interpolators,))
+    for it in its:
+        it.band_extinction = bool(on)
 
 
 def _grid_arrays(interp, filts):
@@ -335,8 +478,12 @@ def model_grid(theta, filts, wave, interpolators, use_norm, av_law,
 
     flux = get_interpolated_flux(teff, logg, z, filts, interpolators)
 
-    # Extinction is linear in Av (fixed Rv), so scale the cached unit curve.
+    # Extinction is linear in Av (fixed Rv), so scale the cached unit curve
+    # at each band's central wavelength, then correct it to the extinction
+    # integrated over the band (see band_extinction).
     atten = _ext_attenuation_base(wave, av_law) ** Av
+    atten = atten * band_extinction_factor(teff, logg, z, Av, filts,
+                                           interpolators, av_law)
     if use_norm:
         model = flux * atten * norm
     else:
@@ -351,6 +498,9 @@ def binary_components(theta, filts, wave, interpolators, av_law):
     the components share ``z``, ``dist`` and ``Av`` and each scales as
     ``(R / d)^2``. ``interpolators`` is a ``(primary, secondary)`` pair (or
     one grid for both). Returns ``(model1, model2)``.
+
+    The extinction integrated over a band depends on the spectrum, so each
+    component gets its own band-extinction correction.
     """
     teff, logg, z, dist, rad, Av, teff2, logg2, rad2 = theta[:9]
     dist = dist * 4.435e+7  # pc -> solRad
@@ -358,6 +508,8 @@ def binary_components(theta, filts, wave, interpolators, av_law):
     atten = _ext_attenuation_base(wave, av_law) ** Av
     f1 = get_interpolated_flux(teff, logg, z, filts, i1)
     f2 = get_interpolated_flux(teff2, logg2, z, filts, i2)
+    f1 = f1 * band_extinction_factor(teff, logg, z, Av, filts, i1, av_law)
+    f2 = f2 * band_extinction_factor(teff2, logg2, z, Av, filts, i2, av_law)
     return (f1 * atten * (rad / dist) ** 2,
             f2 * atten * (rad2 / dist) ** 2)
 
@@ -374,22 +526,30 @@ def get_residuals(theta, flux, flux_er, wave, filts, interpolators, use_norm,
     return residuals, errs
 
 
-def contrast_model(theta, interpolators, cfilts):
+def contrast_model(theta, interpolators, cfilts, av_law=None):
     """Model magnitude difference ``m2 - m1`` of the components in ``cfilts``.
 
     ``-2.5 log10[(rad2 / rad1)^2 F2 / F1]``: distance and the shared
     extinction cancel in the ratio, so it depends on the two stars only.
-    Positive where the secondary is the fainter one.
+    Positive where the secondary is the fainter one. With ``av_law``, the
+    small difference in band-integrated extinction between the two spectra
+    (see ``band_extinction``) is included.
     """
     teff, logg, z, rad = theta[0], theta[1], theta[2], theta[4]
     teff2, logg2, rad2 = theta[6], theta[7], theta[8]
     i1, i2 = _pair(interpolators)
     f1 = get_interpolated_flux(teff, logg, z, cfilts, i1)
     f2 = get_interpolated_flux(teff2, logg2, z, cfilts, i2)
+    if av_law is not None:
+        Av = theta[5]
+        f1 = f1 * band_extinction_factor(teff, logg, z, Av, cfilts, i1,
+                                         av_law)
+        f2 = f2 * band_extinction_factor(teff2, logg2, z, Av, cfilts, i2,
+                                         av_law)
     return -2.5 * np.log10((rad2 / rad) ** 2 * f2 / f1)
 
 
-def contrast_loglike(theta, interpolators, contrast):
+def contrast_loglike(theta, interpolators, contrast, av_law=None):
     """Gaussian log-likelihood of measured component contrasts.
 
     ``contrast`` is ``(cfilts, dmags, sigmas)``: band names, the measured
@@ -397,7 +557,7 @@ def contrast_loglike(theta, interpolators, contrast):
     ratio) and its uncertainty.
     """
     cfilts, dmags, sigmas = contrast
-    dm = contrast_model(theta, interpolators, cfilts)
+    dm = contrast_model(theta, interpolators, cfilts, av_law)
     return -0.5 * (((dm - dmags) / sigmas) ** 2).sum()
 
 
@@ -415,7 +575,7 @@ def log_likelihood(theta, flux, flux_er, wave, filts, interpolators, use_norm,
 
     ll = -.5 * lnl
     if binary and contrast is not None:
-        c = contrast_loglike(theta, interpolators, contrast)
+        c = contrast_loglike(theta, interpolators, contrast, av_law)
         if not np.isfinite(c):
             return -1e300
         ll += c
@@ -460,17 +620,25 @@ GRID_FILES = {
 }
 
 
-def load_band_grid(name):
-    """The ``DFInterpolator`` of model grid ``name`` (e.g. ``'bosz'``)."""
+def load_band_grid(name, band_extinction=True):
+    """The ``DFInterpolator`` of model grid ``name`` (e.g. ``'bosz'``).
+
+    It is tagged with ``grid_name`` and, unless ``band_extinction`` is False,
+    set to redden its band fluxes with the extinction integrated over each
+    band (``set_band_extinction``; see ``band_extinction``)."""
     import pandas as pd
     from isochrones.interp import DFInterpolator
     from .config import gridsdir
-    fn = GRID_FILES.get(str(name).lower())
+    key = str(name).lower()
+    fn = GRID_FILES.get(key)
     if fn is None:
         raise ValueError(f'unknown model grid {name!r}; known grids: '
                          f'{", ".join(GRID_FILES)}')
     with open(f'{gridsdir}/{fn}', 'rb') as fh:
-        return DFInterpolator(pd.read_pickle(fh))
+        interp = DFInterpolator(pd.read_pickle(fh))
+    interp.grid_name = key
+    interp.band_extinction = bool(band_extinction)
+    return interp
 
 
 def split_grid_name(name):

@@ -49,10 +49,13 @@ def _fitter(tmp_path, grids, refit=False, norm=False, teff_hi=7000.):
     return f
 
 
-def _fake_out(tmp_path, grid, norm=False, star=None, signature=None):
+def _fake_out(tmp_path, grid, norm=False, star=None, signature=None,
+              band_extinction=True):
     d = {'global_lnZ': 1.0, 'posterior_samples': {},
          'star': star or _star(), 'norm': norm,
          'model_grid': grid, 'binary': False}
+    if band_extinction is not None:
+        d['band_extinction'] = band_extinction
     if signature is not None:
         d['fit_signature'] = signature
     with open(tmp_path / f'{grid}_out.pkl', 'wb') as fh:
@@ -146,3 +149,22 @@ def test_output_from_before_the_excess_scatter_rename_is_reused(tmp_path,
     _fake_out(tmp_path, 'phoenix', signature=old)
     fitted, _ = _run(monkeypatch, f)
     assert fitted == []
+
+
+def test_fit_with_another_band_extinction_setting_is_refitted(tmp_path,
+                                                              monkeypatch,
+                                                              capsys):
+    # Outputs written before band-integrated extinction (no
+    # 'band_extinction' entry) used the central-wavelength extinction.
+    f = _fitter(tmp_path, ['phoenix', 'btsettl', 'kurucz'])
+    sig = f._fit_signature()
+    _fake_out(tmp_path, 'phoenix', signature=sig)
+    _fake_out(tmp_path, 'btsettl', signature=sig, band_extinction=None)
+    _fake_out(tmp_path, 'kurucz', signature=sig, band_extinction=False)
+    fitted, _ = _run(monkeypatch, f)
+    assert fitted == ['btsettl', 'kurucz']
+    assert 'band_extinction' in capsys.readouterr().out
+    # and the other way round
+    f.band_extinction = False
+    fitted, _ = _run(monkeypatch, f)
+    assert fitted == ['phoenix']
